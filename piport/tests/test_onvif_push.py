@@ -359,6 +359,31 @@ class TestEarlySync(unittest.TestCase):
         self.assertFalse(any(b"onClockSync" in p for p in payloads))
 
 
+class TestG3Sync(unittest.TestCase):
+    """AIPORT_ONVIF_G3_SYNC: yi-protect's G3 clock-sync placement."""
+
+    def test_sync_at_start_and_before_every_key_frame(self):
+        out = io.BytesIO()
+        writer = onvif_push.ExtendedFlvWriter(out.write, _clock(0.01), g3_sync=True)
+        writer.header(_flv([])[:13])
+        meta = onvif_push._flv_tag(18, _meta(), 0)
+        writer.sync_if_due(0)
+        writer.tag(meta[:11], meta[11:])
+        writer.initial_sync()
+        for tag_type, ts, payload in [(9, 0, _AVC_CONFIG), (9, 0, _KEY), (9, 50, _INTER),
+                                      (9, 1000, _KEY)]:
+            tag = onvif_push._flv_tag(tag_type, payload, ts)
+            # Codec configs reach FlvPush apart from the frames, never as a key frame.
+            writer.sync_if_due(ts, payload is not _AVC_CONFIG
+                               and onvif_push._is_keyframe(tag[:11], payload))
+            writer.tag(tag[:11], tag[11:])
+        names = [b"onMpma" if b"onMpma" in p else b"onClockSync" if b"onClockSync" in p
+                 else p for p in (t[2] for t in _parse_extended(out.getvalue()))]
+        self.assertEqual(names, [_meta(), b"onMpma", b"onClockSync", _AVC_CONFIG,
+                                 b"onClockSync", b"onMpma", _KEY, _INTER,
+                                 b"onClockSync", b"onMpma", _KEY])
+
+
 class TestStreamName(unittest.TestCase):
     def test_replaced_and_tag_resized(self):
         tag = onvif_push._flv_tag(18, _meta("piport"), 0)
@@ -372,6 +397,48 @@ class TestStreamName(unittest.TestCase):
         tag = onvif_push._flv_tag(9, _KEY, 40)
         self.assertEqual(onvif_push.set_stream_name(tag[:11], tag[11:], "X"),
                          (tag[:11], tag[11:]))
+
+
+class TestGstPull(unittest.TestCase):
+    """AIPORT_ONVIF_GSTREAMER: rtspsrc's jitter buffer, video and audio copied."""
+
+    def test_flvmux_metadata_gets_a_stream_name(self):
+        amf = onvif_push._amf_string
+        flvmux = (b"\x02" + amf("onMetaData") + b"\x08" + struct.pack(">I", 1)
+                  + amf("duration") + b"\x00" + struct.pack(">d", 0) + b"\x00\x00\x09")
+        tag = onvif_push._flv_tag(18, flvmux, 0)
+        _, body = onvif_push.set_stream_name(tag[:11], tag[11:], "piport")
+        self.assertEqual(body[:-4], b"\x02" + amf("onMetaData") + b"\x08" + struct.pack(">I", 2)
+                         + amf("streamName") + b"\x02" + amf("piport")
+                         + amf("duration") + b"\x00" + struct.pack(">d", 0) + b"\x00\x00\x09")
+
+    def test_command_copies_video_and_audio(self):
+        cmd = onvif_push.gst_push_cmd("gst", "rtsp://cam/101", audio="pcmu")
+        self.assertIn("latency=500", cmd)
+        self.assertIn("rtppcmudepay", cmd)
+        self.assertNotIn("avenc_aac", cmd)
+        self.assertNotIn("decodebin", cmd)
+        self.assertEqual(cmd[-3:], ["fdsink", "fd=1", "sync=true"])
+
+    def test_no_camera_audio_is_silent_aac(self):
+        cmd = onvif_push.gst_push_cmd("gst", "rtsp://cam/101", camera_audio=False)
+        self.assertIn("wave=silence", cmd)
+        self.assertIn("avenc_aac", cmd)
+
+    def test_dead_pull_tries_the_next_depayloader(self):
+        launched = []
+
+        def fake_cmd(gst_bin, url, camera_audio=True, audio="pcmu"):
+            launched.append(audio)
+            return [sys.executable, "-c", "pass"]
+
+        pull = onvif_push.SharedPull("rtsp://cam/101")
+        with mock.patch.object(onvif_push, "GSTREAMER", True), \
+                mock.patch.object(onvif_push, "gst_push_cmd", fake_cmd), \
+                self.assertLogs("aiport-onvif", "WARNING"):
+            for attempt in range(5):
+                pull._pull_once(attempt)
+        self.assertEqual(launched, ["pcmu", "pcma", "aac", "encode", "pcmu"])
 
 
 class TestPullPool(unittest.TestCase):

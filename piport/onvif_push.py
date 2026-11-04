@@ -281,6 +281,26 @@ def read_tags(read):
             return
 
 
+def drain_socket(sock, name=""):
+    """Read and discard what Protect sends back on a push until the socket closes.
+    Live 2026-11-01: Protect writes ~25 B/s on some pushes and nothing read it, so
+    140 KB had piled up per socket after 90 min; once the window closes Protect's
+    writes block. unifi-cam-proxy's nc drains its socket the same way. Still piling
+    up at 21:36 with the audio changes reverted, so it isn't an audio side effect."""
+    def run():
+        while True:
+            try:
+                if not sock.recv(4096):
+                    return
+            except socket.timeout:  # the push's 30 s send timeout; quiet is fine here
+                continue
+            except OSError:
+                return
+    thread = threading.Thread(target=run, daemon=True, name=f"push-drain-{name}")
+    thread.start()
+    return thread
+
+
 def check_video_codec(tag_header, body):
     if tag_header[0] == _TAG_VIDEO and len(body) > 4:
         codec = video_codec(body)
@@ -968,6 +988,7 @@ class FlvPush:
             sock = self._sock = socket.create_connection((self.host, self.port),
                                                          timeout=self.timeout_s)
             sock.settimeout(30)
+            drain_socket(sock, f"{self.device_id}/{self.channel}")
             log.info("push %s/%s -> %s:%d streamName=%s started (attempt %d, %s)",
                      self.device_id, self.channel, self.host, self.port, self.stream_name,
                      attempt, _describe(self.source_url))

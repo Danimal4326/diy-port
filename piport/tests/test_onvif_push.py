@@ -6,8 +6,10 @@ clock_sync.py on a real ffmpeg FLV, before the trailer units were corrected.)"""
 import io
 import itertools
 import os
+import socket
 import struct
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -549,6 +551,20 @@ class TestSharedPushes(unittest.TestCase):
             self.assertIn(b"onClockSync", tags[4][2])
             self.assertIn(b"onMpma", tags[5][2])
             self.assertEqual([t[1] for t in tags[6:]], [10, 40, 1000])
+
+
+class TestDrainSocket(unittest.TestCase):
+    def test_reads_what_protect_sends_until_closed(self):
+        # Live 2026-11-01: nothing read Protect's replies, 140 KB piled up per push socket.
+        ours, protect = socket.socketpair()
+        ours.settimeout(0.05)  # quiet spells (the push's send timeout) don't end it
+        thread = onvif_push.drain_socket(ours, "test")
+        time.sleep(0.15)
+        protect.sendall(b"x" * 300000)  # more than a socket buffer holds unread
+        protect.close()
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        ours.close()
 
 
 if __name__ == "__main__":

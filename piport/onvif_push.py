@@ -45,9 +45,11 @@ log = logging.getLogger("aiport-onvif")
 # the app pull full resolution.
 SUB_CHANNELS = ("video2", "video3")
 
-# An ONVIF camera's video runs one of two ways, set by AIPORT_ONVIF_TRANSCODE:
+# An ONVIF camera's video runs one of two ways, set by AIPORT_ONVIF_TRANSCODE: empty or 0 for
+# none, 1 for every camera, or a comma-separated list of device IDs (MACs), so cameras can
+# move one at a time.
 #
-# Off (default): ffmpeg pulls the camera's main stream and substream and copies them.
+# Off: ffmpeg pulls the camera's main stream and substream and copies them.
 #
 # On ("option C"): what the AI Port itself does with an ONVIF camera. Its ubnt_av_aiport
 # (v5.1.12, Ghidra) pulls the main stream once with rtspsrc protocols=tcp latency=500
@@ -68,8 +70,23 @@ SUB_CHANNELS = ("video2", "video3")
 # (unifi-cam-proxy's Driveway gets a UBNT one), and with a sync every 5 s a cold start played
 # ~1 s then paused ~5 s, as if waiting for the next sync to place frames on the wall clock.
 # A sync every 1 s was worse; G3 sync was "very stable".
-TRANSCODE = os.environ.get("AIPORT_ONVIF_TRANSCODE", "").strip().lower() in (
-    "1", "true", "yes", "on")
+def parse_transcode(value):
+    """AIPORT_ONVIF_TRANSCODE: False, True or the set of device IDs."""
+    value = (value or "").strip().lower()
+    if value in ("", "0", "false", "no", "off"):
+        return False
+    if value in ("1", "true", "yes", "on"):
+        return True
+    return {d.strip().replace(":", "").upper() for d in value.split(",") if d.strip()}
+
+
+TRANSCODE = parse_transcode(os.environ.get("AIPORT_ONVIF_TRANSCODE"))
+
+
+def transcodes(device_id):
+    return TRANSCODE is True or bool(TRANSCODE) and device_id in TRANSCODE
+
+
 TRANSCODE_CHANNELS = ("video1", "video2", "video3")
 TRANSCODE_KBPS = dict(zip(TRANSCODE_CHANNELS, (4000, 2000, 500)))
 G3_SYNC_FALLBACK_S = 10.0
@@ -1085,17 +1102,17 @@ class PushManager:
 
     def transcode_video3(self, device_id):
         """{width, height} video3 is encoded at under TRANSCODE, else None."""
-        if not TRANSCODE:
+        if not transcodes(device_id):
             return None
         with self._lock:
             src = self._sources.get(device_id)
             size = transcode_video3_size(src["width"], src["height"]) if src else None
             return {"width": size[0], "height": size[1]} if size else None
 
-    def _channel_url(self, src, channel):
+    def _channel_url(self, device_id, src, channel):
         """The url `channel` pushes; None while SUB_CHANNELS wait for the profiles."""
         url = src["url"]
-        if TRANSCODE and channel in TRANSCODE_CHANNELS:
+        if transcodes(device_id) and channel in TRANSCODE_CHANNELS:
             # One pull of the main stream, started once the substream size is known.
             return None if url in self._looking_up else url
         if channel not in SUB_CHANNELS:
@@ -1105,11 +1122,11 @@ class PushManager:
         sub = self._subs.get(url)
         return sub["url"] if sub else url
 
-    def _renditions(self, src):
+    def _renditions(self, device_id, src):
         """TRANSCODE outputs for a camera: video1 at its main size with a 1 s GOP, video2 at
         the substream's and video3 at 360 lines (what Protect is told) with GOP 24, as the
         AI Port's S0/S1/S2."""
-        if not TRANSCODE:
+        if not transcodes(device_id):
             return None
         sub = self._subs.get(src["url"])
         main = (src["width"], src["height"], src["fps"])
@@ -1193,8 +1210,8 @@ class PushManager:
     def _sync(self, device_id):
         src = self._sources.get(device_id)
         wanted = self._wanted.get(device_id, {}) if src else {}
-        urls = {channel: self._channel_url(src, channel) for channel in wanted}
-        renditions = self._renditions(src) if src else None
+        urls = {channel: self._channel_url(device_id, src, channel) for channel in wanted}
+        renditions = self._renditions(device_id, src) if src else None
         rend = lambda channel: renditions if channel in TRANSCODE_CHANNELS else None
         for key in [k for k in self._pushes if k[0] == device_id]:
             want, url = wanted.get(key[1]), urls.get(key[1])

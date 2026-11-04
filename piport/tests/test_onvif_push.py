@@ -299,6 +299,28 @@ class TestPushManager(unittest.TestCase):
                                                       ("video3", 640, 360, 20, 500, 24)))
         self.assertIsNone(self.m.transcode_video3("CAM"))  # only under TRANSCODE
 
+    def test_transcode_is_per_camera(self):
+        self._two_profiles()
+        settings = {**_settings("video1", "S1"), **_settings("video3", "S3")}
+        with mock.patch.object(onvif_push, "TRANSCODE", {"CAM"}):
+            for device in ("CAM", "OTHER"):
+                self.m.configure(device, settings)
+                self.m.set_source(device, f"rtsp://{device}/101", width=2560, height=1440, fps=20)
+            self.assertEqual(self.m.transcode_video3("CAM"), {"width": 640, "height": 360})
+            self.assertIsNone(self.m.transcode_video3("OTHER"))
+        pushes = {p.args[:2]: p for p in self.started if not p.stop.called}
+        self.assertIsNotNone(pushes["CAM", "video1"].renditions)
+        self.assertIsNone(pushes["OTHER", "video1"].renditions)
+
+    def test_transcode_setting(self):
+        parse = onvif_push.parse_transcode
+        for off in (None, "", "0", "off"):
+            self.assertIs(parse(off), False)
+        for on in ("1", "true", "ON"):
+            self.assertIs(parse(on), True)
+        self.assertEqual(parse(" 80:be:af:92:83:56, F4E2C60D4B4C "),
+                         {"80BEAF928356", "F4E2C60D4B4C"})
+
     def test_transcode_video3_keeps_the_camera_aspect(self):
         self.assertEqual(onvif_push.transcode_video3_size(1920, 1080), (640, 360))
         self.assertEqual(onvif_push.transcode_video3_size(1280, 960), (480, 360))

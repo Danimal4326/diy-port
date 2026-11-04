@@ -379,15 +379,17 @@ and asks for each channel to be pushed to `tcp://<console>:7550` in Ubiquiti's
 with one `ffmpeg -c:v copy` per channel (no re-encode), and the AI Port runs
 detection on the camera's stream like on a UniFi camera's.
 
-There are two ways to run this video, set by one setting:
+There are two ways to run this video, set per camera by one setting.
+`AIPORT_ONVIF_TRANSCODE` is empty or `0` for none, `1` for every camera, or a
+comma-separated list of device IDs (MACs) such as `80BEAF928356,F4E2C60D4B4C`.
 
-| `AIPORT_ONVIF_TRANSCODE` | What it does | Camera sessions | Sizes sent to Protect |
+| Camera is | What it does | Camera sessions | Sizes sent to Protect |
 |---|---|---|---|
-| `0` (default) | `ffmpeg` copies the camera's main stream and substream | 3, with detection | The camera's own |
-| `1` (macOS only) | One `gst-launch` decodes the main stream once and encodes each channel with VideoToolbox, as the real AI Port does | 2, with detection | `video1` main size at 4000 kbps, `video2` substream size at 2000 kbps, `video3` 360 lines at 500 kbps |
+| Not selected (default) | `ffmpeg` copies the camera's main stream and substream | 3, with detection | The camera's own |
+| Selected (macOS only) | One `gst-launch` decodes the main stream once and encodes each channel with VideoToolbox, as the real AI Port does | 2, with detection | `video1` main size at 4000 kbps, `video2` substream size at 2000 kbps, `video3` 360 lines at 500 kbps |
 
-`1` needs `brew install gstreamer`. On an M1 Pro it used about 11% of one core and
-up to about 290 MB per camera, against about 1% and 11 MB for `0`.
+Selected cameras need `brew install gstreamer`. On an M1 Pro one used about 11% of
+one core and up to about 290 MB, against about 1% and 11 MB when not selected.
 
 Verified on a Raspberry Pi 5 (Docker, Coral) with a Hikvision 4K camera and
 Protect 7.2: live view in the app and browser, recording, and smart-detect

@@ -4546,9 +4546,13 @@ def handle_function(ws, msg, device_info):
             sub = _onvif.substream(payload["deviceID"])
             sub_channel = {"enabled": True, "width": sub["width"], "height": sub["height"],
                            "fps": sub["fps"] or channel["fps"], "bitrate": 1000000} if sub else None
+            video = {k: dict(sub_channel if sub and k in onvif_push.SUB_CHANNELS else channel)
+                     for k in payload["video"]}
+            video3 = _onvif.transcode_video3(payload["deviceID"])
+            if video3 and "video3" in video:
+                video["video3"].update(video3)
             send_msg(ws, "ChangeVideoSettings", {
-                "video": {k: dict(sub_channel if sub and k in onvif_push.SUB_CHANNELS else channel)
-                          for k in payload["video"]},
+                "video": video,
                 "audio": {"enabled": True, "volume": 100},
             }, in_response_to=msg_id)
             return

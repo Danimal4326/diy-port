@@ -8,6 +8,8 @@ import itertools
 import os
 import struct
 import sys
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -153,10 +155,13 @@ class TestPushManager(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.started = []
 
-        def make(device_id, channel, url, name, dest, ffmpeg_bin, camera_audio=True, pool=None):
+        def make(device_id, channel, url, name, dest, ffmpeg_bin, camera_audio=True, pool=None,
+                 renditions=None):
             push = mock.Mock()
             push.args = (device_id, channel, url, name, dest)
-            push.matches.side_effect = lambda u, n, d: (u, n, d) == (url, name, dest)
+            push.renditions = renditions
+            push.matches.side_effect = lambda u, n, d, r=None: (u, n, d, r) == (
+                url, name, dest, renditions)
             push.start.return_value = push
             self.started.append(push)
             return push
@@ -189,6 +194,7 @@ class TestPushManager(unittest.TestCase):
             self.m.configure("CAM", _settings("video1", "S1"))   # the repeat: reconnect
             self.assertEqual(len(self.started), 2)
             self.started[0].stop.assert_called_once()
+            self.started[0].restart_source.assert_called_once()
             clock[0] += 5
             self.m.configure("CAM", _settings("video1", "S1"))   # within 10 s: kept
             self.assertEqual(len(self.started), 2)
@@ -264,6 +270,38 @@ class TestPushManager(unittest.TestCase):
         self.assertEqual(self._pushed(), {"video1": "rtsp://cam/101", "video2": "rtsp://cam/102",
                                           "video3": "rtsp://cam/102"})
         self.assertEqual(self.m.substream("CAM"), {"width": 640, "height": 360, "fps": 20})
+
+    def test_transcode_pulls_main_once_and_encodes_substream_size(self):
+        # AIPORT_ONVIF_TRANSCODE (option C, as the AI Port): every channel comes from one
+        # pull of the main stream, video2/video3 encoded at the size Protect is told.
+        self._two_profiles()
+        with mock.patch.object(onvif_push, "TRANSCODE", True):
+            self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video2", "S2"),
+                                     **_settings("video3", "S3")})
+            self.m.set_source("CAM", "rtsp://cam/101", width=2560, height=1440, fps=20)
+        self.assertEqual(set(self._pushed().values()), {"rtsp://cam/101"})
+        renditions = {p.renditions for p in self.started}
+        self.assertEqual(len(renditions), 1)  # one TranscodePull for the camera
+        self.assertEqual(renditions.pop(), (("video1", 2560, 1440, 20, 4000, 20),
+                                            ("video2", 640, 360, 20, 2000, 24),
+                                            ("video3", 640, 360, 20, 500, 24)))
+
+    def test_transcode_video3_is_360_lines_whatever_the_substream(self):
+        self._two_profiles()
+        self.profiles[1].update(width=1280, height=720)
+        with mock.patch.object(onvif_push, "TRANSCODE", True):
+            self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video3", "S3")})
+            self.m.set_source("CAM", "rtsp://cam/101", width=2560, height=1440, fps=20)
+            self.assertEqual(self.m.transcode_video3("CAM"), {"width": 640, "height": 360})
+        self.assertEqual(self.started[0].renditions, (("video1", 2560, 1440, 20, 4000, 20),
+                                                      ("video2", 1280, 720, 20, 2000, 24),
+                                                      ("video3", 640, 360, 20, 500, 24)))
+        self.assertIsNone(self.m.transcode_video3("CAM"))  # only under TRANSCODE
+
+    def test_transcode_video3_keeps_the_camera_aspect(self):
+        self.assertEqual(onvif_push.transcode_video3_size(1920, 1080), (640, 360))
+        self.assertEqual(onvif_push.transcode_video3_size(1280, 960), (480, 360))
+        self.assertIsNone(onvif_push.transcode_video3_size(None, None))
 
     def test_video3_waits_for_profiles(self):
         # No push on the main stream first: a camera allows few RTSP sessions, and a
@@ -439,6 +477,73 @@ class TestGstPull(unittest.TestCase):
             for attempt in range(5):
                 pull._pull_once(attempt)
         self.assertEqual(launched, ["pcmu", "pcma", "aac", "encode", "pcmu"])
+
+
+class TestTranscode(unittest.TestCase):
+    """AIPORT_ONVIF_TRANSCODE: decode once, one encoder and FLV pipe per channel."""
+
+    OUTPUTS = [(7, 2560, 1440, 20, 4000, 20), (8, 640, 360, 20, 2000, 24),
+               (9, None, None, None, 500, 24)]
+
+    def test_command_decodes_once_and_encodes_per_output(self):
+        cmd = onvif_push.transcode_cmd("gst", "rtsp://cam/101", self.OUTPUTS, audio="pcmu")
+        self.assertEqual(cmd.count("vtdec"), 1)
+        self.assertEqual(cmd.count("vtenc_h264"), 3)
+        self.assertIn("latency=500", cmd)
+        for fd, kbps in ((7, 4000), (8, 2000), (9, 500)):
+            self.assertIn(f"fd={fd}", cmd)
+            self.assertIn(f"bitrate={kbps}", cmd)
+            self.assertIn(f"mux{fd}.audio", cmd)  # the camera's audio teed to each mux
+        self.assertIn("video/x-raw,format=NV12,width=640,height=360,framerate=20/1", cmd)
+        self.assertIn("video/x-raw,format=NV12", cmd)  # unknown size: the camera's
+        self.assertEqual(cmd.count("rtppcmudepay"), 1)
+        self.assertNotIn("mux.audio", cmd)
+
+    def test_no_camera_audio_is_silent_aac(self):
+        cmd = onvif_push.transcode_cmd("gst", "rtsp://cam/101", self.OUTPUTS, camera_audio=False)
+        self.assertIn("wave=silence", cmd)
+        self.assertEqual(cmd.count("avenc_aac"), 1)
+
+    def test_pool_shares_one_transcode_across_channels(self):
+        renditions = (("video1", 2560, 1440, 20, 4000, 20), ("video2", 640, 360, 20, 2000, 24))
+        with mock.patch.object(onvif_push.TranscodePull, "start", lambda self: self), \
+                mock.patch.object(onvif_push.TranscodePull, "stop") as stop:
+            pool = onvif_push.PullPool()
+            v1 = pool.acquire("rtsp://cam/101", True, "video1", renditions)
+            v2 = pool.acquire("rtsp://cam/101", True, "video2", renditions)
+            self.assertIsNot(v1, v2)
+            self.assertIs(v1.transcode, v2.transcode)
+            pool.release(v1)
+            stop.assert_not_called()
+            pool.release(v2)
+            stop.assert_called_once()
+
+    def test_restart_replaces_a_hung_pipeline(self):
+        # Live 2026-11-03 17:24: gst-launch alive, camera socket CLOSED, no output for 2.5 h.
+        pull = onvif_push.TranscodePull("rtsp://cam/101", False,
+                                        (("video1", 2560, 1440, 20, 4000, 20),))
+        with mock.patch.object(onvif_push, "transcode_cmd", return_value=["sleep", "30"]):
+            runner = threading.Thread(target=pull._pull_once, args=(1,), daemon=True)
+            runner.start()
+            while pull._proc is None:
+                time.sleep(0.01)
+            self.assertFalse(pull.restart("re-send"))    # just started: left to come up
+            pull._restarted -= onvif_push.RECONNECT_MIN_S
+            self.assertTrue(pull.restart("re-send"))
+            self.assertFalse(pull.restart("re-send"))    # the other channel's re-send
+            runner.join(timeout=10)
+        self.assertFalse(runner.is_alive())
+        self.assertIsNotNone(pull._proc.poll())
+
+    def test_restart_source_only_touches_a_transcode(self):
+        push = onvif_push.FlvPush("CAM", "video1", "rtsp://cam/101", "S", "tcp://h:1",
+                                  pool=mock.Mock())
+        push._pull = mock.Mock(spec=onvif_push.SharedPull)
+        push.restart_source("re-send")                   # a plain pull has no pipeline to restart
+        owner = mock.Mock(spec=onvif_push.TranscodePull)
+        push._pull = mock.Mock(transcode=owner)
+        push.restart_source("re-send")
+        owner.restart.assert_called_once_with("re-send")
 
 
 class TestPullPool(unittest.TestCase):

@@ -399,7 +399,7 @@ class TestEarlySync(unittest.TestCase):
 
 
 class TestG3Sync(unittest.TestCase):
-    """AIPORT_ONVIF_G3_SYNC: yi-protect's G3 clock-sync placement."""
+    """AIPORT_ONVIF_TRANSCODE's clock syncs: yi-protect's G3 placement."""
 
     def test_sync_at_start_and_before_every_key_frame(self):
         out = io.BytesIO()
@@ -436,48 +436,6 @@ class TestStreamName(unittest.TestCase):
         tag = onvif_push._flv_tag(9, _KEY, 40)
         self.assertEqual(onvif_push.set_stream_name(tag[:11], tag[11:], "X"),
                          (tag[:11], tag[11:]))
-
-
-class TestGstPull(unittest.TestCase):
-    """AIPORT_ONVIF_GSTREAMER: rtspsrc's jitter buffer, video and audio copied."""
-
-    def test_flvmux_metadata_gets_a_stream_name(self):
-        amf = onvif_push._amf_string
-        flvmux = (b"\x02" + amf("onMetaData") + b"\x08" + struct.pack(">I", 1)
-                  + amf("duration") + b"\x00" + struct.pack(">d", 0) + b"\x00\x00\x09")
-        tag = onvif_push._flv_tag(18, flvmux, 0)
-        _, body = onvif_push.set_stream_name(tag[:11], tag[11:], "piport")
-        self.assertEqual(body[:-4], b"\x02" + amf("onMetaData") + b"\x08" + struct.pack(">I", 2)
-                         + amf("streamName") + b"\x02" + amf("piport")
-                         + amf("duration") + b"\x00" + struct.pack(">d", 0) + b"\x00\x00\x09")
-
-    def test_command_copies_video_and_audio(self):
-        cmd = onvif_push.gst_push_cmd("gst", "rtsp://cam/101", audio="pcmu")
-        self.assertIn("latency=500", cmd)
-        self.assertIn("rtppcmudepay", cmd)
-        self.assertNotIn("avenc_aac", cmd)
-        self.assertNotIn("decodebin", cmd)
-        self.assertEqual(cmd[-3:], ["fdsink", "fd=1", "sync=true"])
-
-    def test_no_camera_audio_is_silent_aac(self):
-        cmd = onvif_push.gst_push_cmd("gst", "rtsp://cam/101", camera_audio=False)
-        self.assertIn("wave=silence", cmd)
-        self.assertIn("avenc_aac", cmd)
-
-    def test_dead_pull_tries_the_next_depayloader(self):
-        launched = []
-
-        def fake_cmd(gst_bin, url, camera_audio=True, audio="pcmu"):
-            launched.append(audio)
-            return [sys.executable, "-c", "pass"]
-
-        pull = onvif_push.SharedPull("rtsp://cam/101")
-        with mock.patch.object(onvif_push, "GSTREAMER", True), \
-                mock.patch.object(onvif_push, "gst_push_cmd", fake_cmd), \
-                self.assertLogs("aiport-onvif", "WARNING"):
-            for attempt in range(5):
-                pull._pull_once(attempt)
-        self.assertEqual(launched, ["pcmu", "pcma", "aac", "encode", "pcmu"])
 
 
 class TestTranscode(unittest.TestCase):
@@ -518,6 +476,24 @@ class TestTranscode(unittest.TestCase):
             stop.assert_not_called()
             pool.release(v2)
             stop.assert_called_once()
+
+    def test_flvmux_metadata_gets_a_stream_name(self):
+        amf = onvif_push._amf_string
+        flvmux = (b"\x02" + amf("onMetaData") + b"\x08" + struct.pack(">I", 1)
+                  + amf("duration") + b"\x00" + struct.pack(">d", 0) + b"\x00\x00\x09")
+        tag = onvif_push._flv_tag(18, flvmux, 0)
+        _, body = onvif_push.set_stream_name(tag[:11], tag[11:], "piport")
+        self.assertEqual(body[:-4], b"\x02" + amf("onMetaData") + b"\x08" + struct.pack(">I", 2)
+                         + amf("streamName") + b"\x02" + amf("piport")
+                         + amf("duration") + b"\x00" + struct.pack(">d", 0) + b"\x00\x00\x09")
+
+    def test_only_a_transcode_push_syncs_as_a_g3(self):
+        # C was only ever run live with G3 syncs; the current option keeps its early sync.
+        for renditions, g3 in ((None, False), ((("video1", 1, 1, 20, 1, 20),), True)):
+            push = onvif_push.FlvPush("CAM", "video1", "rtsp://cam/101", "S", "tcp://h:1",
+                                      pool=mock.Mock(), renditions=renditions)
+            writer = push._new_writer(lambda data: None)
+            self.assertEqual((writer.g3_sync, writer.early_sync), (g3, not g3))
 
     def test_restart_replaces_a_hung_pipeline(self):
         # Live 2026-11-03 17:24: gst-launch alive, camera socket CLOSED, no output for 2.5 h.

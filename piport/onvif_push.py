@@ -45,47 +45,38 @@ log = logging.getLogger("aiport-onvif")
 # the app pull full resolution.
 SUB_CHANNELS = ("video2", "video3")
 
-# AIPORT_ONVIF_G3_SYNC=1: clock syncs as yi-protect's FlvPush sends them, "matching a real
-# G3": onMpma + onClockSync at connection start (after onMetaData, before the codec
-# configs), then onClockSync + onMpma before every key frame, 10 s fallback. Live 02:22 on
-# Driveway (2026-11-03): Protect plays this camera through an fMP4 player with
-# useWallClock=1 (unifi-cam-proxy's Driveway gets a UBNT one), and with a sync every 5 s a
-# cold start played ~1 s then paused ~5 s, as if waiting for the next sync to place frames
-# on the wall clock. A sync every 1 s was worse; G3 sync was "very stable". Both pieces
-# failed live on 2026-11-01 (sync-on-key stalled the feed, the early sync made the view
-# stick), but the Opus track in then turned out to cause that.
-G3_SYNC = os.environ.get("AIPORT_ONVIF_G3_SYNC", "").strip().lower() in (
-    "1", "true", "yes", "on")
-G3_SYNC_FALLBACK_S = 10.0
-CLOCK_SYNC_INTERVAL_S = 5.0
-# AIPORT_ONVIF_GSTREAMER=1: pull the camera with GStreamer instead of ffmpeg, as the real
-# AI Port does. Its ubnt_av_aiport (v5.1.12, Ghidra) runs rtspsrc protocols=tcp latency=500
-# tcp-timeout=5000000: a jitter buffer that re-times RTP packets onto the camera's clock
-# before anything downstream sees them. ffmpeg stamps packets on arrival, and Driveway's
-# arrive clumped (9-19% <5 ms apart, gaps to ~200 ms; 2026-11-01). Through rtspsrc
-# latency=500 the same substream came out of flvmux exactly 50 ms apart, and live view was
-# "very smooth". Video and audio are copied as with ffmpeg. Needs `brew install gstreamer`
-# (1.28.8 tested); AIPORT_ONVIF_GST_LATENCY_MS sets the buffer.
-GSTREAMER = os.environ.get("AIPORT_ONVIF_GSTREAMER", "").strip().lower() in (
-    "1", "true", "yes", "on")
-GST_LATENCY_MS = int(os.environ.get("AIPORT_ONVIF_GST_LATENCY_MS", "") or 500)
-GST_BIN = (os.environ.get("AIPORT_ONVIF_GST_BIN") or shutil.which("gst-launch-1.0")
-           or "/opt/homebrew/bin/gst-launch-1.0")  # launchd's PATH has no Homebrew
-# AIPORT_ONVIF_TRANSCODE=1 ("option C"): what the AI Port itself does with an ONVIF camera.
-# Its ubnt_av_aiport (v5.1.12, Ghidra) pulls the main stream once, decodes it once
-# (v4l2dec) and re-encodes one stream per channel (S0 with a 1 s GOP, S1 GOP 24 at 2 Mbps,
-# S2 at 300 kbps), so every channel Protect plays was made by its own encoder at a steady
-# rate. Here one gst-launch does the same with VideoToolbox (vtdec, one vtenc_h264 per
-# channel), each channel on its own pipe: one RTSP session per camera instead of main +
-# substream. video2 is encoded at the substream's size and video3 at TRANSCODE_VIDEO3_HEIGHT,
-# as Protect is told (ChangeVideoSettings). AIPORT_ONVIF_TRANSCODE_KBPS sets video1,video2,
-# video3 bitrates.
-# Uses the GStreamer settings above; AIPORT_ONVIF_GSTREAMER need not be set.
+# An ONVIF camera's video runs one of two ways, set by AIPORT_ONVIF_TRANSCODE:
+#
+# Off (default): ffmpeg pulls the camera's main stream and substream and copies them.
+#
+# On ("option C"): what the AI Port itself does with an ONVIF camera. Its ubnt_av_aiport
+# (v5.1.12, Ghidra) pulls the main stream once with rtspsrc protocols=tcp latency=500
+# tcp-timeout=5000000, decodes it once (v4l2dec) and re-encodes one stream per channel (S0
+# with a 1 s GOP, S1 GOP 24 at 2 Mbps, S2 at 300 kbps), so every channel Protect plays was
+# made by its own encoder at a steady rate. Here one gst-launch does the same with
+# VideoToolbox (vtdec, one vtenc_h264 per channel), each channel on its own pipe: one RTSP
+# session per camera instead of main + substream. video2 is encoded at the substream's size
+# and video3 at TRANSCODE_VIDEO3_HEIGHT, as Protect is told (ChangeVideoSettings). macOS
+# only; needs `brew install gstreamer` (1.28.8 tested). Live 2026-11-03/04 on Driveway: the
+# user found it more stable than ffmpeg or a copied GStreamer pull, with a better picture,
+# and it held 20 fps for 10 h 48 min.
+#
+# It also sends clock syncs as yi-protect's FlvPush does, "matching a real G3": onMpma +
+# onClockSync at connection start (after onMetaData, before the codec configs), then
+# onClockSync + onMpma before every key frame, 10 s fallback. Live 02:22 on Driveway
+# (2026-11-03): Protect plays this camera through an fMP4 player with useWallClock=1
+# (unifi-cam-proxy's Driveway gets a UBNT one), and with a sync every 5 s a cold start played
+# ~1 s then paused ~5 s, as if waiting for the next sync to place frames on the wall clock.
+# A sync every 1 s was worse; G3 sync was "very stable".
 TRANSCODE = os.environ.get("AIPORT_ONVIF_TRANSCODE", "").strip().lower() in (
     "1", "true", "yes", "on")
 TRANSCODE_CHANNELS = ("video1", "video2", "video3")
-TRANSCODE_KBPS = dict(zip(TRANSCODE_CHANNELS, (
-    int(k) for k in (os.environ.get("AIPORT_ONVIF_TRANSCODE_KBPS", "") or "4000,2000,500").split(","))))
+TRANSCODE_KBPS = dict(zip(TRANSCODE_CHANNELS, (4000, 2000, 500)))
+G3_SYNC_FALLBACK_S = 10.0
+CLOCK_SYNC_INTERVAL_S = 5.0
+GST_LATENCY_MS = 500
+GST_BIN = (shutil.which("gst-launch-1.0")
+           or "/opt/homebrew/bin/gst-launch-1.0")  # launchd's PATH has no Homebrew
 TRANSCODE_VIDEO3_HEIGHT = 360
 
 
@@ -389,7 +380,7 @@ def ffmpeg_push_cmd(ffmpeg_bin, source_url, stream_name, camera_audio=True, copy
 
 
 # GStreamer can't copy "whatever the camera sends" in one pipeline (parsebin dropped
-# Driveway's G.711 mu-law, live 2026-11-02 03:42), so SharedPull tries each depayloader in
+# Driveway's G.711 mu-law, live 2026-11-02 03:42), so TranscodePull tries each depayloader in
 # turn until one negotiates, and re-encodes to AAC as ffmpeg's fallback does.
 GST_AUDIO = ("pcmu", "pcma", "aac", "encode")
 _GST_AAC = ["audioconvert", "!", "audioresample", "!", "audio/x-raw,rate=32000,channels=1",
@@ -400,28 +391,9 @@ _GST_DEPAY = {"pcmu": ["rtppcmudepay", "!", "mux.audio"],
               "encode": ["decodebin", "!"] + _GST_AAC}
 
 
-def gst_push_cmd(gst_bin, source_url, camera_audio=True, audio="pcmu",
-                 latency_ms=GST_LATENCY_MS):
-    """ffmpeg_push_cmd's FLV on stdout from GStreamer: rtspsrc with the AI Port's settings,
-    video depayloaded and parsed (not re-encoded), the camera's audio copied through the
-    `audio` depayloader of GST_AUDIO, or a silent AAC track for a camera without audio.
-    fdsink sync=true hands tags on at their pipeline time, so they leave as evenly as the
-    jitter buffer timed them."""
-    cmd = [gst_bin, "-q",
-           "rtspsrc", f"location={source_url}", "protocols=tcp", f"latency={int(latency_ms)}",
-           "tcp-timeout=5000000", "teardown-timeout=2000000000", "name=src",
-           "src.", "!", "application/x-rtp,media=video", "!", "rtph264depay", "!",
-           "h264parse", "!", "video/x-h264,stream-format=avc,alignment=au", "!", "mux.video"]
-    if camera_audio:
-        cmd += ["src.", "!", "application/x-rtp,media=audio", "!"] + _GST_DEPAY[audio]
-    else:
-        cmd += ["audiotestsrc", "wave=silence", "is-live=true", "!"] + _GST_AAC
-    return cmd + ["flvmux", "name=mux", "streamable=true", "!", "fdsink", "fd=1", "sync=true"]
-
-
 def transcode_cmd(gst_bin, source_url, outputs, camera_audio=True, audio="pcmu",
                   latency_ms=GST_LATENCY_MS):
-    """TRANSCODE's pipeline: rtspsrc as gst_push_cmd, the video decoded once and teed to
+    """TRANSCODE's pipeline: rtspsrc with the AI Port's settings, the video decoded once and teed to
     one encoder + flvmux per output, each written to its own fd. outputs is
     [(fd, width, height, fps, kbps, gop)]; a None size or fps keeps the camera's. The audio
     (copied, or silent AAC) is teed to every mux."""
@@ -558,7 +530,6 @@ class SharedPull:
         self._proc = None
         self._codec_error_logged = None
         self._copy_audio = True  # until ffmpeg says FLV can't hold the camera's audio
-        self._gst_audio = 0      # GST_AUDIO index: the next depayloader after a dead pull
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name=f"pull-{_describe(source_url)}")
 
@@ -606,10 +577,8 @@ class SharedPull:
         codec_error = None
         try:
             # The streamName is set per push (set_stream_name), not here.
-            cmd = (gst_push_cmd(GST_BIN, self.source_url, self.camera_audio,
-                                GST_AUDIO[self._gst_audio]) if GSTREAMER else
-                   ffmpeg_push_cmd(self.ffmpeg_bin, self.source_url, "piport",
-                                   self.camera_audio, self._copy_audio))
+            cmd = ffmpeg_push_cmd(self.ffmpeg_bin, self.source_url, "piport",
+                                  self.camera_audio, self._copy_audio)
             proc = self._proc = subprocess.Popen(cmd,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
             stderr_tail = start_stderr_drain(proc)
@@ -638,9 +607,6 @@ class SharedPull:
                 proc.stdout.close()
             self._end_sinks()
         frames = self._frames
-        if GSTREAMER and self.camera_audio and frames == 0 and not self._stop.is_set():
-            self._gst_audio = (self._gst_audio + 1) % len(GST_AUDIO)
-            reason += f"; trying GStreamer audio {GST_AUDIO[self._gst_audio]} next"
         if not self._stop.is_set():
             stderr = stderr_tail()[-300:]
             msg = ("pull %s ended after %d frames: %s%s", _describe(self.source_url), frames,
@@ -936,6 +902,10 @@ class FlvPush:
             except OSError:
                 pass
 
+    def _new_writer(self, write):
+        g3 = self.renditions is not None
+        return ExtendedFlvWriter(write, early_sync=not g3, g3_sync=g3)
+
     def restart_source(self, reason):
         """TRANSCODE: replace the pipeline behind this push. Other pulls are left alone."""
         owner = getattr(self._pull, "transcode", None)
@@ -998,13 +968,13 @@ class FlvPush:
                 sock.sendall(data)
                 sent += len(data)
 
-            writer = ExtendedFlvWriter(write, early_sync=not G3_SYNC, g3_sync=G3_SYNC)
+            writer = self._new_writer(write)
             writer.header(header)
             for tag_header, body in config:
                 tag_header, body = set_stream_name(tag_header, body, self.stream_name)
-                writer.sync_if_due(0)  # sets the trailer time; never due here with G3_SYNC
+                writer.sync_if_due(0)  # sets the trailer time; never due here with g3_sync
                 writer.tag(_retime(tag_header, 0), body)
-                if G3_SYNC and tag_header[0] == _TAG_SCRIPT:
+                if writer.g3_sync and tag_header[0] == _TAG_SCRIPT:
                     writer.initial_sync()
             while not self._stop.is_set():
                 item = self._get(self.STALL_S)

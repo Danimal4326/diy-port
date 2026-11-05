@@ -409,40 +409,41 @@ sudo python3 diyport/instance_manager.py destroy lab2
 Assigning a third-party (ONVIF) camera to the AI Port hands that camera's video
 ingest to the AI Port: Protect sends the camera's RTSP URL (`OnvifStreamControl`)
 and asks for each channel to be pushed to `tcp://<console>:7550` in Ubiquiti's
-`extendedFlv` format (`ChangeVideoSettings`). `diyport/onvif_push.py` does that
-with one `ffmpeg -c:v copy` per channel (no re-encode), and the AI Port runs
-detection on the camera's stream like on a UniFi camera's.
+`extendedFlv` format (`ChangeVideoSettings`). `diyport/onvif_push.py` does that,
+and the AI Port runs detection on the camera's stream like on a UniFi camera's.
 
-There are two ways to run this video, set per camera by one setting.
-`AIPORT_ONVIF_TRANSCODE` is empty or `0` for none, `1` for every camera, or a
-comma-separated list of device IDs (MACs) such as `80BEAF928356,F4E2C60D4B4C`.
+There are three ways to run this video, set by `AIPORT_ONVIF_MODE`: a default, then any
+per-camera exceptions by device ID (MAC), such as `isolated,AABBCCDDEEFF=copy`.
 
-| Camera is | What it does | Camera sessions | Sizes sent to Protect |
-|---|---|---|---|
-| Not selected (default) | `ffmpeg` copies the camera's main stream and substream | 3, with detection | The camera's own |
-| Selected (macOS only) | One `gst-launch` decodes the main stream once and encodes each channel with VideoToolbox, as the real AI Port does | 2, with detection | `video1` main size at 4000 kbps, `video2` substream size at 2000 kbps, `video3` 360 lines at 500 kbps |
+| Mode | What it does | Pushes run in | Camera sessions | Sizes sent to Protect |
+|---|---|---|---|---|
+| `copy` (default) | `ffmpeg` copies the camera's main stream and substream | `avclient.py` | 3, with detection | The camera's own |
+| `transcode` | One `gst-launch` decodes the main stream once and encodes each channel with VideoToolbox, as the real AI Port does | `avclient.py` | 2, with detection | `video1` main size at 4000 kbps, `video2` substream size at 2000 kbps, `video3` 360 lines at 500 kbps |
+| `isolated` | As `transcode` | A process per camera | 2, with detection | As `transcode` |
+
+`transcode` and `isolated` need macOS and `brew install gstreamer`. On an M1 Pro a transcoded
+camera used about 11% of one core and up to about 290 MB, against about 1% and 11 MB for
+`copy`. On a machine without them, the camera logs an error and uses `copy`.
+
+In `isolated`, a crash in the push costs that camera's video for a few seconds and leaves
+detection running, and the process is replaced. It doesn't help the other way round: if
+detection's process dies, the push stops with it.
 
 Protect doesn't always tell diy-port it was removed: it just closes each connection without
 a message. An adopted instance logs `was this AI Port removed in Protect?` once this has
 gone on for `AIPORT_REFUSED_WARN_S` seconds (default 180, `0` turns this off). It doesn't
 clear the adoption itself, since a console problem could look the same.
 
-Selected cameras need `brew install gstreamer`. On an M1 Pro one used about 11% of
-one core and up to about 290 MB, against about 1% and 11 MB when not selected.
-
 The video and detection restart separately: each has its own camera pull, so losing
-one leaves the other running. A selected camera's pipeline is replaced when a channel
+one leaves the other running. A transcoded camera's pipeline is replaced when a channel
 has produced no video for `AIPORT_ONVIF_STALL_S` seconds (default 30, `0` turns this
 off). A settings re-send from Protect reconnects only that channel's push, unless a
-channel has been silent for 5 s. On either kind of camera, the log warns
+channel has been silent for 5 s. In every mode, the log warns
 `restream: no video to Protect` when a channel has delivered nothing for
 `AIPORT_STREAM_STALL_S` seconds.
 
-`AIPORT_ONVIF_SUBPROCESS` runs a camera's video push in a process of its own, set like
-`AIPORT_ONVIF_TRANSCODE`: empty or `0` for none, `1` for every camera, or a list of device
-IDs. A crash there costs that camera's video for a few seconds and leaves detection running,
-and the process is replaced. It doesn't help the other way round: if detection's process dies,
-the push stops with it.
+`AIPORT_ONVIF_AUDIO_OFF` (empty or `0` for none, `1` for all, or a list of device IDs) is an experiment: the listed cameras' replies tell
+Protect audio is off, while their pushes keep the audio track.
 
 If the camera's ONVIF profiles can't be read, diy-port tries again: twice within a few
 seconds, then every 30 s, 2 minutes and 10 minutes. Until it succeeds, `video2` and

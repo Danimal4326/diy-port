@@ -38,18 +38,25 @@ def _alive(pid):
         return False
 
 
-class TestToggle(unittest.TestCase):
-    def test_off_all_or_listed(self):
-        with mock.patch.object(rs, "SUBPROCESS", False):
-            self.assertFalse(rs.uses_process("CAM"))
-        with mock.patch.object(rs, "SUBPROCESS", True):
-            self.assertTrue(rs.uses_process("CAM"))
-        with mock.patch.object(rs, "SUBPROCESS", {"CAM"}):
-            self.assertTrue(rs.uses_process("CAM"))
-            self.assertFalse(rs.uses_process("OTHER"))
+def _modes(default, **per_camera):
+    return mock.patch.multiple(onvif_push, MODES=(default, per_camera),
+                               transcode_available=lambda: True)
 
-    def test_a_camera_left_out_keeps_its_push_in_this_process(self):
-        with mock.patch.object(rs, "SUBPROCESS", {"CAM"}):
+
+class TestMode(unittest.TestCase):
+    def test_only_isolated_uses_a_process(self):
+        with _modes("isolated", COPIED="copy", TRANSCODED="transcode"):
+            self.assertTrue(rs.uses_process("CAM"))
+            self.assertFalse(rs.uses_process("COPIED"))
+            self.assertFalse(rs.uses_process("TRANSCODED"))
+
+    def test_isolated_without_gstreamer_stays_in_this_process(self):
+        with mock.patch.multiple(onvif_push, MODES=("isolated", {}),
+                                 transcode_available=lambda: False):
+            self.assertFalse(rs.uses_process("NOGST2"))
+
+    def test_a_camera_not_isolated_keeps_its_push_in_this_process(self):
+        with _modes("copy", CAM="isolated"):
             push = rs.Workers().push("OTHER", "video1", "rtsp://c", "S", DEST)
             self.assertIsInstance(push, onvif_push.FlvPush)
             remote = rs.Workers().push("CAM", "video1", "rtsp://c", "S", DEST)
@@ -57,7 +64,7 @@ class TestToggle(unittest.TestCase):
 
     def test_bad_destination_raises_as_a_real_push_does(self):
         # PushManager._sync catches this ValueError and logs it.
-        with mock.patch.object(rs, "SUBPROCESS", True), self.assertRaises(ValueError):
+        with _modes("isolated"), self.assertRaises(ValueError):
             rs.Workers().push("CAM", "video1", "rtsp://c", "S", "udp://nope")
 
 

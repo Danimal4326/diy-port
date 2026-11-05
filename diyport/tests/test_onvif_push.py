@@ -37,6 +37,13 @@ def _clock(step):
     return lambda: 1000.0 + next(c) * step
 
 
+
+def _modes(default, **per_camera):
+    """AIPORT_ONVIF_MODE, on a machine that can transcode."""
+    return mock.patch.multiple(onvif_push, MODES=(default, per_camera),
+                               transcode_available=lambda: True)
+
+
 class TestRewrite(unittest.TestCase):
     def _run(self, src, step=0.01):
         out = io.BytesIO()
@@ -272,10 +279,10 @@ class TestPushManager(unittest.TestCase):
         self.assertEqual(self.m.substream("CAM"), {"width": 640, "height": 360, "fps": 20})
 
     def test_transcode_pulls_main_once_and_encodes_substream_size(self):
-        # AIPORT_ONVIF_TRANSCODE (option C, as the AI Port): every channel comes from one
+        # AIPORT_ONVIF_MODE=transcode (option C, as the AI Port): every channel comes from one
         # pull of the main stream, video2/video3 encoded at the size Protect is told.
         self._two_profiles()
-        with mock.patch.object(onvif_push, "TRANSCODE", True):
+        with _modes("transcode"):
             self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video2", "S2"),
                                      **_settings("video3", "S3")})
             self.m.set_source("CAM", "rtsp://cam/101", width=2560, height=1440, fps=20)
@@ -289,7 +296,7 @@ class TestPushManager(unittest.TestCase):
     def test_transcode_video3_is_360_lines_whatever_the_substream(self):
         self._two_profiles()
         self.profiles[1].update(width=1280, height=720)
-        with mock.patch.object(onvif_push, "TRANSCODE", True):
+        with _modes("transcode"):
             self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video3", "S3")})
             self.m.set_source("CAM", "rtsp://cam/101", width=2560, height=1440, fps=20)
             self.assertEqual(self.m.transcode_channels("CAM")["video3"],
@@ -300,7 +307,7 @@ class TestPushManager(unittest.TestCase):
         self.assertIsNone(self.m.transcode_channels("CAM"))  # only under TRANSCODE
 
     def test_transcode_channels_leave_out_what_is_unknown(self):
-        with mock.patch.object(onvif_push, "TRANSCODE", True):
+        with _modes("transcode"):
             self.assertIsNone(self.m.transcode_channels("CAM"))  # no source yet
             self.m.set_source("CAM", "rtsp://cam/101")
             self.assertEqual(self.m.transcode_channels("CAM")["video2"], {"bitrate": 2000000})
@@ -415,7 +422,7 @@ class TestPushManager(unittest.TestCase):
     def test_transcode_is_per_camera(self):
         self._two_profiles()
         settings = {**_settings("video1", "S1"), **_settings("video3", "S3")}
-        with mock.patch.object(onvif_push, "TRANSCODE", {"CAM"}):
+        with _modes("copy", CAM="transcode"):
             for device in ("CAM", "OTHER"):
                 self.m.configure(device, settings)
                 self.m.set_source(device, f"rtsp://{device}/101", width=2560, height=1440, fps=20)
@@ -426,14 +433,61 @@ class TestPushManager(unittest.TestCase):
         self.assertIsNotNone(pushes["CAM", "video1"].renditions)
         self.assertIsNone(pushes["OTHER", "video1"].renditions)
 
-    def test_transcode_setting(self):
-        parse = onvif_push.parse_transcode
-        for off in (None, "", "0", "off"):
-            self.assertIs(parse(off), False)
-        for on in ("1", "true", "ON"):
-            self.assertIs(parse(on), True)
-        self.assertEqual(parse(" 80:be:af:92:83:56, F4E2C60D4B4C "),
-                         {"80BEAF928356", "F4E2C60D4B4C"})
+    def test_modes_setting(self):
+        parse = onvif_push.parse_modes
+        self.assertEqual(parse(None), ("copy", {}))
+        self.assertEqual(parse(""), ("copy", {}))
+        self.assertEqual(parse("isolated"), ("isolated", {}))
+        self.assertEqual(parse("ISOLATED, aa:bb:cc:dd:ee:ff=copy,AABBCC000002=transcode"),
+                         ("isolated", {"AABBCCDDEEFF": "copy", "AABBCC000002": "transcode"}))
+        with self.assertLogs("aiport-onvif", "WARNING"):
+            self.assertEqual(parse("isolated,CAM=fast,1"), ("isolated", {}))
+
+    def test_mode_is_per_camera(self):
+        with _modes("isolated", OTHER="copy", THIRD="transcode"):
+            self.assertEqual(onvif_push.mode_of("CAM"), "isolated")
+            self.assertEqual(onvif_push.mode_of("OTHER"), "copy")
+            self.assertEqual(onvif_push.mode_of("THIRD"), "transcode")
+            self.assertTrue(onvif_push.transcodes("CAM"))
+            self.assertTrue(onvif_push.transcodes("THIRD"))
+            self.assertFalse(onvif_push.transcodes("OTHER"))
+
+    def test_camera_falls_back_to_copy_where_it_cannot_transcode(self):
+        # Before this, such a camera had no video at all, and retried forever.
+        onvif_push._fell_back.discard("NOGST")
+        with mock.patch.multiple(onvif_push, MODES=("isolated", {}),
+                                 transcode_available=lambda: False):
+            with self.assertLogs("aiport-onvif", "ERROR") as logs:
+                self.assertEqual(onvif_push.mode_of("NOGST"), "copy")
+            self.assertIn("using copy", logs.output[0])
+            self.assertFalse(onvif_push.transcodes("NOGST"))
+            with self.assertNoLogs("aiport-onvif", "ERROR"):     # said once
+                onvif_push.mode_of("NOGST")
+
+    def test_transcode_needs_macos_and_gstreamer(self):
+        with mock.patch.object(onvif_push.os.path, "exists", return_value=True):
+            with mock.patch.object(onvif_push.sys, "platform", "darwin"):
+                self.assertTrue(onvif_push.transcode_available())
+            with mock.patch.object(onvif_push.sys, "platform", "linux"):
+                self.assertFalse(onvif_push.transcode_available())
+        with mock.patch.object(onvif_push.sys, "platform", "darwin"), \
+                mock.patch.object(onvif_push.os.path, "exists", return_value=False):
+            self.assertFalse(onvif_push.transcode_available())
+
+    def test_old_settings_are_called_out(self):
+        with self.assertLogs("aiport-onvif", "WARNING") as logs:
+            onvif_push.warn_old_settings({"AIPORT_ONVIF_TRANSCODE": "1",
+                                          "AIPORT_ONVIF_SUBPROCESS": "CAM"})
+        self.assertEqual(len(logs.output), 2)
+        with self.assertNoLogs("aiport-onvif", "WARNING"):
+            onvif_push.warn_old_settings({"AIPORT_ONVIF_TRANSCODE": ""})
+
+    def test_camera_list_setting(self):
+        parse = onvif_push.parse_camera_list
+        self.assertFalse(parse(""))
+        self.assertFalse(parse("0"))
+        self.assertIs(parse("1"), True)
+        self.assertEqual(parse("aa:bb:cc:dd:ee:ff, CAM"), {"AABBCCDDEEFF", "CAM"})
 
     def test_transcode_video3_keeps_the_camera_aspect(self):
         self.assertEqual(onvif_push.transcode_video3_size(1920, 1080), (640, 360))
@@ -535,7 +589,7 @@ class TestEarlySync(unittest.TestCase):
 
 
 class TestG3Sync(unittest.TestCase):
-    """AIPORT_ONVIF_TRANSCODE's clock syncs: yi-protect's G3 placement."""
+    """Option C's clock syncs: yi-protect's G3 placement."""
 
     def test_sync_at_start_and_before_every_key_frame(self):
         out = io.BytesIO()
@@ -575,7 +629,7 @@ class TestStreamName(unittest.TestCase):
 
 
 class TestTranscode(unittest.TestCase):
-    """AIPORT_ONVIF_TRANSCODE: decode once, one encoder and FLV pipe per channel."""
+    """Option C: decode once, one encoder and FLV pipe per channel."""
 
     OUTPUTS = [(7, 2560, 1440, 20, 4000, 20), (8, 640, 360, 20, 2000, 24),
                (9, None, None, None, 500, 24)]

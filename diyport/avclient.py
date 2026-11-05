@@ -4240,6 +4240,17 @@ def _apply_motion_settings(payload):
         _motion_detectors.pop(device_id, None)
 
 
+# Experiment 2026-11-04: ONVIF cameras whose ChangeVideoSettings reply says audio is off (empty or
+# 0 for none, 1 for all, or a list of device IDs), while browser live view on them doesn't resume after about a minute
+# away from the page. Only the reply changes: the push keeps its audio track, since Protect's
+# media server needs one to finish initializing.
+_ONVIF_AUDIO_OFF = onvif_push.parse_camera_list(os.environ.get("AIPORT_ONVIF_AUDIO_OFF"))
+
+
+def _reports_audio_off(device_id):
+    return _ONVIF_AUDIO_OFF is True or bool(_ONVIF_AUDIO_OFF) and device_id in _ONVIF_AUDIO_OFF
+
+
 def _onvif_main_size(device_id, payload):
     """(width, height) an ONVIF camera's main stream is pushed at: as probed, else as already
     set (a failed probe must not change the size and so restart a transcode), else as announced."""
@@ -4425,7 +4436,7 @@ def handle_function(ws, msg, device_info):
                 video[k].update(encoded.get(k) or {})
             send_msg(ws, "ChangeVideoSettings", {
                 "video": video,
-                "audio": {"enabled": True, "volume": 100},
+                "audio": {"enabled": not _reports_audio_off(payload["deviceID"]), "volume": 100},
             }, in_response_to=msg_id)
             return
         send_msg(ws, "ChangeVideoSettings", {

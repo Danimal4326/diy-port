@@ -31,6 +31,7 @@ import queue
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -45,13 +46,15 @@ log = logging.getLogger("aiport-onvif")
 # the app pull full resolution.
 SUB_CHANNELS = ("video2", "video3")
 
-# An ONVIF camera's video runs one of two ways, set by AIPORT_ONVIF_TRANSCODE: empty or 0 for
-# none, 1 for every camera, or a comma-separated list of device IDs (MACs), so cameras can
-# move one at a time.
+# An ONVIF camera's video runs one of three ways, set by AIPORT_ONVIF_MODE: a default, then any
+# per-camera exceptions, as `isolated,AABBCCDDEEFF=copy`, so cameras can move one at a time.
+#   copy (the default)  below's "copy"; pushes run in avclient. Works anywhere.
+#   transcode           below's "option C"; pushes run in avclient.
+#   isolated            option C, with pushes in a process per camera (onvif_restream.py).
 #
-# Off: ffmpeg pulls the camera's main stream and substream and copies them.
+# copy: ffmpeg pulls the camera's main stream and substream and copies them.
 #
-# On ("option C"): what the AI Port itself does with an ONVIF camera. Its ubnt_av_aiport
+# Option C: what the AI Port itself does with an ONVIF camera. Its ubnt_av_aiport
 # (v5.1.12, Ghidra) pulls the main stream once with rtspsrc protocols=tcp latency=500
 # tcp-timeout=5000000, decodes it once (v4l2dec) and re-encodes one stream per channel (S0
 # with a 1 s GOP, S1 GOP 24 at 2 Mbps, S2 at 300 kbps), so every channel Protect plays was
@@ -70,21 +73,78 @@ SUB_CHANNELS = ("video2", "video3")
 # (unifi-cam-proxy's Driveway gets a UBNT one), and with a sync every 5 s a cold start played
 # ~1 s then paused ~5 s, as if waiting for the next sync to place frames on the wall clock.
 # A sync every 1 s was worse; G3 sync was "very stable".
-def parse_transcode(value):
-    """AIPORT_ONVIF_TRANSCODE: False, True or the set of device IDs."""
+COPY, TRANSCODE, ISOLATED = "copy", "transcode", "isolated"
+_MODE_NAMES = (COPY, TRANSCODE, ISOLATED)
+
+
+def _camera_id(value):
+    return value.strip().replace(":", "").upper()
+
+
+def parse_camera_list(value):
+    """A setting naming cameras: empty or 0 for none, 1 for all, else False, True or their IDs."""
     value = (value or "").strip().lower()
     if value in ("", "0", "false", "no", "off"):
         return False
     if value in ("1", "true", "yes", "on"):
         return True
-    return {d.strip().replace(":", "").upper() for d in value.split(",") if d.strip()}
+    return {_camera_id(d) for d in value.split(",") if d.strip()}
 
 
-TRANSCODE = parse_transcode(os.environ.get("AIPORT_ONVIF_TRANSCODE"))
+def parse_modes(value):
+    """AIPORT_ONVIF_MODE, "<default>[,<deviceID>=<mode>...]" -> (default, {deviceID: mode}). A bad
+    entry is logged and left out, so that camera gets the default."""
+    default, per_camera = COPY, {}
+    for part in (value or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        camera, _, mode = part.rpartition("=")
+        mode = mode.strip().lower()
+        if mode not in _MODE_NAMES:
+            log.warning("ignoring bad AIPORT_ONVIF_MODE entry %r: the modes are %s", part,
+                        ", ".join(_MODE_NAMES))
+        elif camera:
+            per_camera[_camera_id(camera)] = mode
+        else:
+            default = mode
+    return default, per_camera
+
+
+MODES = parse_modes(os.environ.get("AIPORT_ONVIF_MODE"))
+_fell_back = set()  # cameras already logged as falling back to copy
+
+
+def transcode_available():
+    """Option C needs macOS (VideoToolbox) and gst-launch. Before this, a camera set to it on a
+    machine without them had no video at all, retrying forever."""
+    return sys.platform == "darwin" and os.path.exists(GST_BIN)
+
+
+def mode_of(device_id):
+    """How this camera's video runs: copy where a transcode can't run here."""
+    default, per_camera = MODES
+    mode = per_camera.get(_camera_id(device_id), default)
+    if mode != COPY and not transcode_available():
+        if device_id not in _fell_back:
+            _fell_back.add(device_id)
+            log.error("camera %s is set to %s, which needs macOS and gst-launch (%s; `brew install "
+                      "gstreamer`): using copy instead", device_id, mode, GST_BIN)
+        return COPY
+    return mode
 
 
 def transcodes(device_id):
-    return TRANSCODE is True or bool(TRANSCODE) and device_id in TRANSCODE
+    return mode_of(device_id) != COPY
+
+
+def warn_old_settings(environ=None):
+    """Settings AIPORT_ONVIF_MODE replaced: left in place, they would silently do nothing."""
+    environ = os.environ if environ is None else environ
+    for old in ("AIPORT_ONVIF_TRANSCODE", "AIPORT_ONVIF_SUBPROCESS"):
+        if (environ.get(old) or "").strip():
+            log.warning("%s is no longer read: use AIPORT_ONVIF_MODE (%s)", old,
+                        ", ".join(_MODE_NAMES))
 
 
 TRANSCODE_CHANNELS = ("video1", "video2", "video3")
@@ -1083,6 +1143,7 @@ class PushManager:
                  push_factory=None):
         self.ffmpeg_bin = ffmpeg_bin
         self._push_factory = push_factory  # default FlvPush; see onvif_restream.py
+        warn_old_settings()
         self._fetch_profiles = fetch_profiles or onvif_media.fetch_profiles
         self._background = background  # False runs the profile lookup inline (tests)
         self._lock = threading.Lock()

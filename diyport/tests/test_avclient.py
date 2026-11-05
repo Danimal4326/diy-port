@@ -2836,6 +2836,24 @@ class TestOnvifChannelGeometry(unittest.TestCase):
         self.assertEqual(video["video1"], video["video2"])
         self.assertEqual(video["video1"], video["video3"])
 
+    def _reply_audio(self):
+        dest = {"avSerializer": {"type": "extendedFlv", "parameters": {"streamName": "S"},
+                                 "destinations": ["tcp://10.0.0.1:7550"]}}
+        ws = _FakeWS()
+        av.handle_function(ws, {"functionName": "ChangeVideoSettings", "messageId": "m",
+                                "payload": {"deviceID": "CAMX", "video": {"video1": dest}}}, {})
+        return json.loads(ws.sent[-1])["payload"]["audio"]
+
+    def test_audio_is_reported_on_unless_the_camera_is_listed(self):
+        av._onvif.set_source("CAMX", "rtsp://cam/101", width=2560, height=1440, fps=20)
+        self.assertEqual(self._reply_audio(), {"enabled": True, "volume": 100})
+        with mock.patch.object(av, "_ONVIF_AUDIO_OFF", {"OTHER"}):
+            self.assertTrue(self._reply_audio()["enabled"])
+        with mock.patch.object(av, "_ONVIF_AUDIO_OFF", {"CAMX"}):
+            self.assertEqual(self._reply_audio(), {"enabled": False, "volume": 100})
+        with mock.patch.object(av, "_ONVIF_AUDIO_OFF", True):
+            self.assertFalse(self._reply_audio()["enabled"])
+
     def test_transcode_reports_what_each_encoder_makes(self):
         # Live 2026-11-04 09:20: video2 encoded at 2000 kbps, reported at 1000000.
         import onvif_push
@@ -2844,7 +2862,8 @@ class TestOnvifChannelGeometry(unittest.TestCase):
              "url": "rtsp://cam/101"},
             {"token": "P2", "encoding": "H264", "width": 1280, "height": 720, "fps": 20,
              "url": "rtsp://cam/102"}]
-        with mock.patch.object(onvif_push, "TRANSCODE", True):
+        with mock.patch.multiple(onvif_push, MODES=("transcode", {}),
+                                 transcode_available=lambda: True):
             av._onvif.set_source("CAMX", "rtsp://cam/101", width=2560, height=1440, fps=20)
             video = self._reply()
         got = {c: (v["width"], v["height"], v["fps"], v["bitrate"]) for c, v in video.items()}
@@ -2856,7 +2875,8 @@ class TestOnvifChannelGeometry(unittest.TestCase):
         import onvif_push
         av._stream_probe["CAMX"] = {"width": 1920, "height": 1080, "fps": 15}
         self.addCleanup(lambda: av._stream_probe.pop("CAMX", None))
-        with mock.patch.object(onvif_push, "TRANSCODE", True):
+        with mock.patch.multiple(onvif_push, MODES=("transcode", {}),
+                                 transcode_available=lambda: True):
             av._onvif.set_source("CAMX", "rtsp://cam/101", width=2560, height=1440, fps=20)
             video = self._reply()
         self.assertEqual((video["video1"]["width"], video["video1"]["height"]), (2560, 1440))

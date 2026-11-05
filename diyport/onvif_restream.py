@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""One process per ONVIF camera for its video push to Protect (AIPORT_ONVIF_SUBPROCESS).
+"""One process per ONVIF camera for its video push to Protect (AIPORT_ONVIF_MODE=isolated).
 
 PushManager keeps deciding what each camera should push: channels, stream names, sizes, the
 profile lookup and the replies to Protect. Only the running pushes move: a RemotePush stands in
@@ -30,9 +30,6 @@ import onvif_push
 
 log = logging.getLogger("aiport-onvif")
 
-# Same form as AIPORT_ONVIF_TRANSCODE: empty or 0 for none, 1 for every camera, or a list of device
-# IDs, so cameras can move one at a time.
-SUBPROCESS = onvif_push.parse_transcode(os.environ.get("AIPORT_ONVIF_SUBPROCESS"))
 REPORT_S = 1.0
 SILENT_KILL_S = 15.0    # no report for this long: the process is stuck, so it is replaced
 RESPAWN_MAX_S = 30.0
@@ -41,7 +38,7 @@ IDLE_S = 10.0           # with no pushes left; a re-send stops one push just bef
 
 
 def uses_process(device_id):
-    return SUBPROCESS is True or bool(SUBPROCESS) and device_id in SUBPROCESS
+    return onvif_push.mode_of(device_id) == onvif_push.ISOLATED
 
 
 class RemotePush:

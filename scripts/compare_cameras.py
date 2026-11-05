@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Compare cameras side by side from pi-port logs, e.g. one camera's old feed and its ONVIF
+"""Compare cameras side by side from diy-port logs, e.g. one camera's old feed and its ONVIF
 replacement on two instances. For each camera, over the last --minutes: objects reported to
 Protect (distinct tracks by type), plates read, frame rates, time per detection pass, minutes
 falling behind, and stream trouble. Appends one line per camera to --out.
@@ -8,7 +8,7 @@ falling behind, and stream trouble. Appends one line per camera to --out.
   scripts/compare_cameras.py native:AABBCC3344CC:old onvif:80BEAF928356:onvif
 
 Each camera is instance:deviceID[:label]; the instance's log is
-~/.pi-port/<instance>/logs/piport.log. Standard library only, so Apple's python3 runs it.
+~/.diy-port/<instance>/logs/diyport.log. Standard library only, so Apple's python3 runs it.
 """
 import argparse
 import ast
@@ -67,7 +67,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("cameras", nargs="+", help="instance:deviceID[:label]")
     ap.add_argument("--minutes", type=int, default=30)
-    ap.add_argument("--out", default=os.path.expanduser("~/.pi-port/compare.log"))
+    ap.add_argument("--out", default=os.path.expanduser("~/.diy-port/compare.log"))
     args = ap.parse_args()
 
     now = datetime.now()
@@ -79,7 +79,7 @@ def main():
 
     lines = []
     for inst, cams in by_instance.items():
-        log = os.path.expanduser(f"~/.pi-port/{inst}/logs/piport.log")
+        log = os.path.expanduser(f"~/.diy-port/{inst}/logs/diyport.log")
         stats = scan(log, since, [d for d, _ in cams])
         for dev, label in cams:
             s = stats[dev]

@@ -1,37 +1,37 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Run pi-port under launchd on macOS: started at boot or login, restarted if it exits, logging
-# with rotation (scripts/piport_service.sh does the work). Each instance has its own folder,
-# ~/.pi-port/$PIPORT_INSTANCE/ ("native" when not set; see scripts/piport_paths.sh), and its
-# own launchd job, local.piport.<instance>.
+# Run diy-port under launchd on macOS: started at boot or login, restarted if it exits, logging
+# with rotation (scripts/diyport_service.sh does the work). Each instance has its own folder,
+# ~/.diy-port/$DIYPORT_INSTANCE/ ("native" when not set; see scripts/diyport_paths.sh), and its
+# own launchd job, local.diyport.<instance>.
 #
 #   scripts/macos_launchd.sh install     install it as a launchd agent under your account, start it
-#   scripts/macos_launchd.sh restart     restart pi-port (touching its restart file also works)
+#   scripts/macos_launchd.sh restart     restart diy-port (touching its restart file also works)
 #   scripts/macos_launchd.sh stop        stop it until the next start/install or login
 #   scripts/macos_launchd.sh start       start it again
 #   scripts/macos_launchd.sh status      launchd's view and the last log lines
-#   scripts/macos_launchd.sh logs        follow its logs/piport.log
+#   scripts/macos_launchd.sh logs        follow its logs/diyport.log
 #   scripts/macos_launchd.sh uninstall   stop it and remove the plist
 #
-#   sudo PIPORT_INSTANCE=onvif scripts/macos_launchd.sh install --daemon
+#   sudo DIYPORT_INSTANCE=onvif scripts/macos_launchd.sh install --daemon
 #
 # An agent needs no sudo: macOS lets any user bind ports below 1024. An instance that pulls
 # cameras straight from the LAN (ONVIF) has to be a root daemon instead (--daemon): macOS's
 # Local Network privacy blocks an agent from LAN devices other than the gateway. Give it its own
-# address in piport.env (PIPORT_BIND_IP, and AIPORT_ADVERTISE_IP for Protect); the daemon adds
-# that address to PIPORT_IFACE at every start. With a daemon on the Mac, make every instance
+# address in diyport.env (DIYPORT_BIND_IP, and AIPORT_ADVERTISE_IP for Protect); the daemon adds
+# that address to DIYPORT_IFACE at every start. With a daemon on the Mac, make every instance
 # a daemon on its own address: a user agent can't take the wildcard :443 once root holds a
 # specific address's :443 (EADDRINUSE). After install, the daemon's start, stop, restart
 # and uninstall need sudo too; status and logs don't.
 #
-# Installing "native" for the first time moves the old ~/.piport.env, ~/.piport-state and
-# ~/piport.log* into ~/.pi-port/native/ and replaces the old local.piport agent.
+# Installing "native" for the first time moves the old ~/.diyport.env, ~/.diyport-state and
+# ~/diyport.log* into ~/.diy-port/native/ and replaces the old local.diyport agent.
 #
 # Files an earlier `sudo` run left owned by root have to be handed back before an agent install;
 # install says which and how. The host stats line's GPU and power figures need powermetrics as
 # root: allow just that command with
-#   echo "$USER ALL=(root) NOPASSWD: /usr/bin/powermetrics" | sudo tee /etc/sudoers.d/piport-powermetrics
-#   sudo chmod 440 /etc/sudoers.d/piport-powermetrics && sudo visudo -cf /etc/sudoers.d/piport-powermetrics
+#   echo "$USER ALL=(root) NOPASSWD: /usr/bin/powermetrics" | sudo tee /etc/sudoers.d/diyport-powermetrics
+#   sudo chmod 440 /etc/sudoers.d/diyport-powermetrics && sudo visudo -cf /etc/sudoers.d/diyport-powermetrics
 set -u
 
 die() { echo "macos_launchd: $*" >&2; exit 1; }
@@ -51,10 +51,10 @@ fi
 USER_ID=$(id -u "$USER_NAME")
 USER_HOME=$(eval echo "~$USER_NAME")
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-. "$REPO/scripts/piport_paths.sh"
+. "$REPO/scripts/diyport_paths.sh"
 
-LABEL=${PIPORT_LAUNCHD_LABEL:-local.piport.$INSTANCE}
-OLD_LABEL=local.piport   # the single agent from before ~/.pi-port
+LABEL=${DIYPORT_LAUNCHD_LABEL:-local.diyport.$INSTANCE}
+OLD_LABEL=local.diyport   # the single agent from before ~/.diy-port
 DAEMON_PLIST=/Library/LaunchDaemons/$LABEL.plist
 [ -f "$DAEMON_PLIST" ] && DAEMON=1
 if [ -n "$DAEMON" ]; then
@@ -81,13 +81,13 @@ loaded() { launchctl print "$DOMAIN/$1" >/dev/null 2>&1; }
 
 state_dir() {
     local dir
-    dir=$(sed -n 's/^[[:space:]]*PIPORT_STATE_DIR=//p' "$ENV_FILE" 2>/dev/null | tail -1 \
+    dir=$(sed -n 's/^[[:space:]]*DIYPORT_STATE_DIR=//p' "$ENV_FILE" 2>/dev/null | tail -1 \
         | sed 's/[[:space:]]*#.*//;s/^"//;s/"$//')
     echo "${dir:-$DEFAULT_STATE_DIR}"
 }
 
 migrate_legacy() {
-    # The single instance from before ~/.pi-port becomes "native", with the same identity.
+    # The single instance from before ~/.diy-port becomes "native", with the same identity.
     [ -n "$LEGACY" ] && [ -z "$DAEMON" ] || return 0
     local old_plist=$USER_HOME/Library/LaunchAgents/$OLD_LABEL.plist
     if loaded "$OLD_LABEL"; then
@@ -106,12 +106,12 @@ migrate_legacy() {
         # Its other settings may point inside it too (AIPORT_FACES_DIR).
         sed -i '' "s#$LEGACY_STATE_DIR#$BASE/state#g" "$LEGACY_ENV_FILE"
     fi
-    mv "$LEGACY_ENV_FILE" "$BASE/piport.env" || die "couldn't move $LEGACY_ENV_FILE"
+    mv "$LEGACY_ENV_FILE" "$BASE/diyport.env" || die "couldn't move $LEGACY_ENV_FILE"
     for f in "$LEGACY_LOG" "$LEGACY_LOG".*; do
         [ -e "$f" ] && mv "$f" "$BASE/logs/$(basename "$f")"
     done
-    rm -f "$LEGACY_RESTART_FILE" "$LEGACY_PIDFILE" "$USER_HOME/Library/Logs/piport-launchd.log"
-    . "$REPO/scripts/piport_paths.sh"   # now the new paths
+    rm -f "$LEGACY_RESTART_FILE" "$LEGACY_PIDFILE" "$USER_HOME/Library/Logs/diyport-launchd.log"
+    . "$REPO/scripts/diyport_paths.sh"   # now the new paths
 }
 
 check_ownership() {
@@ -141,7 +141,7 @@ check_ownership() {
 check_not_running() {
     # This instance only (its state dir), so another instance can keep running.
     # A job just booted out takes a few seconds to stop (ExitTimeOut), so wait for it first.
-    local pids pattern="piport/run_all.py .*--state-dir $(state_dir)( |$)"
+    local pids pattern="diyport/run_all.py .*--state-dir $(state_dir)( |$)"
     for _ in $(seq 1 30); do
         pids=$(pgrep -f "$pattern" || true)
         [ -z "$pids" ] && break
@@ -175,19 +175,19 @@ write_plist() {
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>$REPO/scripts/piport_service.sh</string>
+        <string>$REPO/scripts/diyport_service.sh</string>
     </array>
     <key>WorkingDirectory</key><string>$REPO</string>
     <key>EnvironmentVariables</key>
     <dict>
         <!-- ffmpeg and ffprobe come from Homebrew; launchd's own PATH doesn't have it. -->
         <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-        <key>PIPORT_INSTANCE</key><string>$INSTANCE</string>$extra
+        <key>DIYPORT_INSTANCE</key><string>$INSTANCE</string>$extra
     </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>ThrottleInterval</key><integer>10</integer>
-    <!-- The wrapper gives pi-port 10 s to stop cleanly before TERM. -->
+    <!-- The wrapper gives diy-port 10 s to stop cleanly before TERM. -->
     <key>ExitTimeOut</key><integer>30</integer>
     <!-- Not throttled as a background job: it analyses video in real time. -->
     <key>ProcessType</key><string>Interactive</string>
@@ -199,9 +199,9 @@ EOF
     plutil -lint "$PLIST" >/dev/null || die "wrote an invalid $PLIST"
     if [ -n "$DAEMON" ]; then
         chown root:wheel "$PLIST" && chmod 644 "$PLIST"
-        # The folder stays yours: edit piport.env and touch restart without sudo. What the
+        # The folder stays yours: edit diyport.env and touch restart without sudo. What the
         # daemon writes inside (state, logs) is root's but readable.
-        chown "$USER_NAME:staff" "$USER_HOME/.pi-port" "$BASE"
+        chown "$USER_NAME:staff" "$USER_HOME/.diy-port" "$BASE"
     fi
 }
 
@@ -213,7 +213,7 @@ start() {
 status() {
     echo "$LABEL ($([ -n "$DAEMON" ] && echo "root daemon" || echo agent), files in $BASE):"
     if loaded "$LABEL"; then
-        launchctl print "$DOMAIN/$LABEL" | grep -E "^\s*(state|pid|last exit code|runs) =" \
+        launchctl print "$DOMAIN/$LABEL" | grep -E "^[[:space:]]*(state|pid|last exit code|runs) =" \
             | sed 's/^[[:space:]]*/  /'
     else
         echo "  not loaded"
@@ -225,18 +225,18 @@ status() {
 case "$CMD" in
     install)
         migrate_legacy
-        [ -r "$ENV_FILE" ] || die "no $ENV_FILE (copy scripts/piport.env.example)"
+        [ -r "$ENV_FILE" ] || die "no $ENV_FILE (copy scripts/diyport.env.example)"
         [ -x "$REPO/venv/bin/python" ] || die "no venv at $REPO/venv"
         if [ -n "$DAEMON" ]; then
-            grep -qE '^[[:space:]]*PIPORT_BIND_IP=[0-9]' "$ENV_FILE" \
-                || die "a daemon needs its own address: set PIPORT_BIND_IP in $ENV_FILE"
+            grep -qE '^[[:space:]]*DIYPORT_BIND_IP=[0-9]' "$ENV_FILE" \
+                || die "a daemon needs its own address: set DIYPORT_BIND_IP in $ENV_FILE"
         fi
         check_ownership
         check_not_running
         loaded "$LABEL" && launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null
         write_plist
         start
-        echo "installed $PLIST; pi-port starts now and at every $([ -n "$DAEMON" ] && echo boot || echo login)"
+        echo "installed $PLIST; diy-port starts now and at every $([ -n "$DAEMON" ] && echo boot || echo login)"
         sleep 3
         status
         ;;

@@ -438,6 +438,12 @@ channel has been silent for 5 s. On either kind of camera, the log warns
 `restream: no video to Protect` when a channel has delivered nothing for
 `AIPORT_STREAM_STALL_S` seconds.
 
+`AIPORT_ONVIF_SUBPROCESS` runs a camera's video push in a process of its own, set like
+`AIPORT_ONVIF_TRANSCODE`: empty or `0` for none, `1` for every camera, or a list of device
+IDs. A crash there costs that camera's video for a few seconds and leaves detection running,
+and the process is replaced. It doesn't help the other way round: if detection's process dies,
+the push stops with it.
+
 If the camera's ONVIF profiles can't be read, diy-port tries again: twice within a few
 seconds, then every 30 s, 2 minutes and 10 minutes. Until it succeeds, `video2` and
 `video3` use the main stream.

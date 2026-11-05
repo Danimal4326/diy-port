@@ -48,6 +48,7 @@ import apple_fm
 import enrich
 import hoststats
 import onvif_push
+import onvif_restream
 from procutil import start_stderr_drain
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -449,7 +450,8 @@ BEST_FRAME_RECORDS_MAX = 40
 _enrich_cache = {}    # deviceID -> (snapshot mtime, plate/face detections read from it)
 # Third-party (ONVIF) cameras: Protect hands their video ingest to the AI Port,
 # which must push each channel to :7550 (see onvif_push.py).
-_onvif = onvif_push.PushManager(ffmpeg_bin=FFMPEG_BIN)
+_onvif = onvif_push.PushManager(ffmpeg_bin=FFMPEG_BIN,
+                                push_factory=onvif_restream.Workers().push)
 # [hardware] detector / detector_model, set by main(); see detectors/__init__.py. The env
 # defaults also serve replay.py and the tests, which don't run main().
 DETECTOR_BACKEND = (os.environ.get("AIPORT_DETECTOR") or os.environ.get("AIPORT_BACKEND")

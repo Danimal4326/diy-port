@@ -1079,8 +1079,10 @@ PROFILE_WAIT_S = 10.0
 class PushManager:
     """Per-device ONVIF source URL plus the channel pushes Protect asked for."""
 
-    def __init__(self, ffmpeg_bin="ffmpeg", fetch_profiles=None, background=True):
+    def __init__(self, ffmpeg_bin="ffmpeg", fetch_profiles=None, background=True,
+                 push_factory=None):
         self.ffmpeg_bin = ffmpeg_bin
+        self._push_factory = push_factory  # default FlvPush; see onvif_restream.py
         self._fetch_profiles = fetch_profiles or onvif_media.fetch_profiles
         self._background = background  # False runs the profile lookup inline (tests)
         self._lock = threading.Lock()
@@ -1321,7 +1323,7 @@ class PushManager:
             url = urls[channel]
             if url and (device_id, channel) not in self._pushes:
                 try:
-                    push = self._pushes[(device_id, channel)] = FlvPush(
+                    push = self._pushes[(device_id, channel)] = (self._push_factory or FlvPush)(
                         device_id, channel, url, name, dest, self.ffmpeg_bin,
                         camera_audio=src["audio"], pool=self._pool,
                         renditions=rend(channel)).start()

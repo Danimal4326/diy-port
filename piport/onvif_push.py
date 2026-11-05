@@ -95,6 +95,15 @@ GST_LATENCY_MS = 500
 GST_BIN = (shutil.which("gst-launch-1.0")
            or "/opt/homebrew/bin/gst-launch-1.0")  # launchd's PATH has no Homebrew
 TRANSCODE_VIDEO3_HEIGHT = 360
+# A TRANSCODE pipeline with a channel that has produced no video for this long is replaced
+# (0: never). Live 2026-11-03 17:24 on Driveway: gst-launch stayed alive with its RTSP socket
+# CLOSED and no output for 2.5 h. Only Protect's re-sends could end that, and a hang with
+# none went uncaught. Detection has its own pull and is left alone.
+TRANSCODE_STALL_S = float(os.environ.get("AIPORT_ONVIF_STALL_S") or 30)
+# A settings re-send only replaces the pipeline when a channel has been silent this long.
+# Otherwise it reconnects just that push: a restart costs all three channels and a camera
+# session, and encoders that are still producing can't be why Protect lost one stream.
+RESEND_RESTART_QUIET_S = 5.0
 
 
 def transcode_video3_size(width, height):
@@ -547,6 +556,7 @@ class SharedPull:
         self._proc = None
         self._codec_error_logged = None
         self._copy_audio = True  # until ffmpeg says FLV can't hold the camera's audio
+        self._last_video = None  # monotonic s of the last video frame of this pull
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name=f"pull-{_describe(source_url)}")
 
@@ -591,6 +601,7 @@ class SharedPull:
         proc = None
         stderr_tail = lambda: ""
         self._frames = 0
+        self._last_video = None
         codec_error = None
         try:
             # The streamName is set per push (set_stream_name), not here.
@@ -670,6 +681,7 @@ class SharedPull:
             else:
                 self._frames += 1
                 if tag_header[0] == _TAG_VIDEO:
+                    self._last_video = time.monotonic()
                     stats.frame(_tag_timestamp(tag_header))
                 self._deliver(tag_header, body, _is_keyframe(tag_header, payload))
 
@@ -734,16 +746,24 @@ class TranscodePull:
             except subprocess.TimeoutExpired:
                 proc.kill()
 
+    def silent_channels(self, quiet_s, now=None):
+        """Channels with no video frame for quiet_s, counted from this pipeline's last start.
+        Every channel is encoded whether Protect plays it or not, so all of them should flow."""
+        now = time.monotonic() if now is None else now
+        return [channel for channel, out in self.outputs.items()
+                if now - max(out._last_video or self._restarted, self._restarted) >= quiet_s]
+
     def restart(self, reason):
-        """Replace a running pipeline, at most once per RECONNECT_MIN_S (and not within that
-        of its start): every channel's re-send lands here, and each restart costs a camera
-        session. Live 2026-11-03 17:24 on Driveway: gst-launch stayed alive with its RTSP
-        socket CLOSED and no output for 2.5 h, while Protect re-sent video1 and video3 every
-        ~13 s and reconnected pushes kept joining the dead pipeline."""
+        """Replace a running pipeline with a silent channel, at most once per RECONNECT_MIN_S
+        (and not within that of its start): every channel's re-send lands here, and each
+        restart costs a camera session. Live 2026-11-03 17:24 on Driveway: gst-launch stayed
+        alive with its RTSP socket CLOSED and no output for 2.5 h, while Protect re-sent video1
+        and video3 every ~13 s and reconnected pushes kept joining the dead pipeline."""
         proc = self._proc
         now = time.monotonic()
         if (not proc or proc.poll() is not None
-                or now - self._restarted < RECONNECT_MIN_S):
+                or now - self._restarted < RECONNECT_MIN_S
+                or not self.silent_channels(RESEND_RESTART_QUIET_S, now)):
             return False
         self._restarted = now
         log.warning("transcode %s restarting: %s (pid %d)", _describe(self.source_url),
@@ -778,6 +798,7 @@ class TranscodePull:
         ended = threading.Event()
         for out in self.outputs.values():
             out._frames = 0
+            out._last_video = None
             out.reason = "not started"
         try:
             outputs = [(pipes[channel][1], *rest) for channel, *rest in self.renditions]
@@ -813,6 +834,12 @@ class TranscodePull:
         while (not ended.wait(1.0) and not self._stop.is_set()
                and not self._restart.is_set()):
             if proc.poll() is not None:
+                break
+            silent = self.silent_channels(TRANSCODE_STALL_S) if TRANSCODE_STALL_S else None
+            if silent:
+                log.warning("transcode %s stalled: no video on %s for %.0f s, restarting (pid %d)",
+                            _describe(self.source_url), ", ".join(silent), TRANSCODE_STALL_S,
+                            proc.pid)
                 break
         if proc.poll() is None:
             proc.terminate()
@@ -893,6 +920,7 @@ class FlvPush:
         self._queue = queue.Queue(maxsize=self.QUEUE_TAGS)
         self._stop = threading.Event()
         self._sock = None
+        self.last_sent = time.monotonic()  # last video frame written to Protect
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name=f"push-{device_id}-{channel}")
 
@@ -1006,6 +1034,8 @@ class FlvPush:
                 writer.sync_if_due(_tag_timestamp(tag_header),
                                    _is_keyframe(tag_header, item[2][:-4]))
                 writer.tag(tag_header, item[2])
+                if tag_header[0] == _TAG_VIDEO:
+                    self.last_sent = time.monotonic()
         except OSError as exc:
             reason = repr(exc)
         finally:
@@ -1036,6 +1066,17 @@ def retry_delay(retry_s, failed):
 # repeat. At most one reconnect per channel per RECONNECT_MIN_S, so a burst doesn't churn it.
 RECONNECT_MIN_S = 10
 
+# A failed lookup of a camera's ONVIF profiles is tried again, or its video2/video3 stay on the
+# main stream until pi-port restarts. Live 2026-11-04 19:23:39 on Driveway: one "No route to
+# host", the camera reachable 2 s later, and video2 encoded at 2560x1440 instead of 1280x720.
+# First these quick tries, with the channels waiting, so a brief failure changes nothing...
+PROFILE_QUICK_RETRY_S = (2.0, 3.0)
+# ...then, with the channels on the main stream, these (the last repeats). Success moves them
+# to the substream at once, replacing the pushes.
+PROFILE_RETRY_S = (30.0, 120.0, 600.0)
+# ChangeVideoSettings waits this long at most for a lookup, to report the right sizes.
+PROFILE_WAIT_S = 10.0
+
 
 class PushManager:
     """Per-device ONVIF source URL plus the channel pushes Protect asked for."""
@@ -1045,9 +1086,11 @@ class PushManager:
         self._fetch_profiles = fetch_profiles or onvif_media.fetch_profiles
         self._background = background  # False runs the profile lookup inline (tests)
         self._lock = threading.Lock()
+        self._lookup_done = threading.Condition(self._lock)
         self._sources = {}   # device_id -> {"url", "audio", "width", "height", "fps"}
         self._wanted = {}    # device_id -> {channel: (stream_name, destination)}
         self._pushes = {}    # (device_id, channel) -> FlvPush
+        self._last_sent = {}  # (device_id, channel) -> last_sent of a push a re-send replaced
         self._reconnected = {}  # (device_id, channel) -> monotonic time of the last reconnect
         self._pool = PullPool(ffmpeg_bin)  # channels on the same stream share one pull
         self._subs = {}      # main url -> substream profile dict, or None (none/failed)
@@ -1068,15 +1111,30 @@ class PushManager:
             else:
                 self._find_substream(url)
 
-    def _find_substream(self, url):
-        """Look up the camera's profiles once per main url, then start the waiting
-        SUB_CHANNELS pushes (on the substream, or the main stream if there is none)."""
+    def _fetch_substream(self, url, late):
+        """The camera's substream or None; raises if its profiles can't be had."""
+        for delay in (PROFILE_QUICK_RETRY_S if self._background and not late else ()):
+            try:
+                return onvif_media.pick_substream(self._fetch_profiles(url))
+            except Exception as e:
+                log.info("ONVIF profiles of %s: %s, trying again in %.0f s",
+                         urlsplit(url).hostname, e, delay)
+                time.sleep(delay)
+        return onvif_media.pick_substream(self._fetch_profiles(url))
+
+    def _find_substream(self, url, late=0):
+        """Look up the camera's profiles for a main url, then start the waiting SUB_CHANNELS
+        pushes (on the substream, or the main stream if there is none). `late`: how many
+        lookups have already failed, with the pushes running on the main stream."""
         host = urlsplit(url).hostname
+        retry_s = None
         try:
-            sub = onvif_media.pick_substream(self._fetch_profiles(url))
+            sub = self._fetch_substream(url, late)
         except Exception as e:
-            log.warning("ONVIF profiles of %s unavailable (%s): %s carry the main stream",
-                        host, e, "/".join(SUB_CHANNELS))
+            retry_s = PROFILE_RETRY_S[min(late, len(PROFILE_RETRY_S) - 1)]
+            (log.info if late else log.warning)(
+                "ONVIF profiles of %s unavailable (%s): %s carry the main stream, "
+                "trying again in %.0f s", host, e, "/".join(SUB_CHANNELS), retry_s)
             sub = None
         else:
             if sub:
@@ -1088,9 +1146,25 @@ class PushManager:
         with self._lock:
             self._subs[url] = sub
             self._looking_up.discard(url)
-            for device_id, src in list(self._sources.items()):
-                if src["url"] == url:
-                    self._sync(device_id)
+            self._lookup_done.notify_all()
+            used = [d for d, src in self._sources.items() if src["url"] == url]
+            for device_id in used:
+                self._sync(device_id)
+            if retry_s is not None and not used:
+                # Nothing uses this camera now: its next set_source looks it up afresh.
+                del self._subs[url]
+                return
+        if retry_s is not None and self._background:
+            timer = threading.Timer(retry_s, self._find_substream, args=(url, late + 1))
+            timer.daemon = True
+            timer.start()
+
+    def wait_for_substream(self, device_id, timeout=PROFILE_WAIT_S):
+        """Give a running profile lookup for this camera time to finish."""
+        with self._lock:
+            src = self._sources.get(device_id)
+            if src:
+                self._lookup_done.wait_for(lambda: src["url"] not in self._looking_up, timeout)
 
     def substream(self, device_id):
         """{width, height, fps} of the substream SUB_CHANNELS carry, or None if they
@@ -1100,14 +1174,32 @@ class PushManager:
             sub = self._subs.get(src["url"]) if src else None
             return {k: sub[k] for k in ("width", "height", "fps")} if sub else None
 
-    def transcode_video3(self, device_id):
-        """{width, height} video3 is encoded at under TRANSCODE, else None."""
+    def transcode_channels(self, device_id):
+        """{channel: {width, height, fps, bitrate}} of what each channel is encoded at under
+        TRANSCODE, leaving out what isn't known; None when this camera isn't transcoded. So
+        Protect is told what its encoder really makes. Live 2026-11-04 09:20 on Driveway:
+        video2 was encoded at 2000 kbps and reported at 1000000."""
         if not transcodes(device_id):
             return None
         with self._lock:
             src = self._sources.get(device_id)
-            size = transcode_video3_size(src["width"], src["height"]) if src else None
-            return {"width": size[0], "height": size[1]} if size else None
+            renditions = self._renditions(device_id, src) if src else None
+        if not renditions:
+            return None
+        return {channel: {k: v for k, v in (("width", w), ("height", h), ("fps", fps),
+                                            ("bitrate", kbps * 1000)) if v}
+                for channel, w, h, fps, kbps, _ in renditions}
+
+    def stalled_channels(self, stale_s, now=None):
+        """{device_id: [channels]} of the running pushes that have written no video to Protect
+        for stale_s."""
+        now = time.monotonic() if now is None else now
+        stalled = {}
+        with self._lock:
+            for (device_id, channel), push in self._pushes.items():
+                if now - push.last_sent >= stale_s:
+                    stalled.setdefault(device_id, []).append(channel)
+        return {device_id: sorted(channels) for device_id, channels in stalled.items()}
 
     def _channel_url(self, device_id, src, channel):
         """The url `channel` pushes; None while SUB_CHANNELS wait for the profiles."""
@@ -1153,6 +1245,11 @@ class PushManager:
         with self._lock:
             self._sources.pop(device_id, None)
             self._sync(device_id)
+            self._forget_last_sent(device_id)
+
+    def _forget_last_sent(self, device_id):
+        for key in [k for k in self._last_sent if k[0] == device_id]:
+            del self._last_sent[key]
 
     def clear_device(self, device_id):
         """Forget the device entirely: stop pushes and drop its destinations."""
@@ -1160,6 +1257,7 @@ class PushManager:
             self._sources.pop(device_id, None)
             self._wanted.pop(device_id, None)
             self._sync(device_id)
+            self._forget_last_sent(device_id)
 
     def has_source(self, device_id):
         with self._lock:
@@ -1197,6 +1295,9 @@ class PushManager:
                     push = self._pushes.pop(key)
                     push.restart_source("Protect re-sent its settings")
                     push.stop()
+                    # Its replacement inherits this, or a channel Protect keeps re-sending
+                    # would look healthy however long it has delivered nothing.
+                    self._last_sent[key] = push.last_sent
             self._sync(device_id)
 
     def stop_all(self):
@@ -1206,6 +1307,7 @@ class PushManager:
             self._pushes.clear()
             self._sources.clear()
             self._wanted.clear()
+            self._last_sent.clear()
 
     def _sync(self, device_id):
         src = self._sources.get(device_id)
@@ -1221,9 +1323,11 @@ class PushManager:
             url = urls[channel]
             if url and (device_id, channel) not in self._pushes:
                 try:
-                    self._pushes[(device_id, channel)] = FlvPush(
+                    push = self._pushes[(device_id, channel)] = FlvPush(
                         device_id, channel, url, name, dest, self.ffmpeg_bin,
                         camera_audio=src["audio"], pool=self._pool,
                         renditions=rend(channel)).start()
+                    if (device_id, channel) in self._last_sent:
+                        push.last_sent = self._last_sent.pop((device_id, channel))
                 except ValueError:
                     log.warning("push %s/%s: bad destination %r", device_id, channel, dest)

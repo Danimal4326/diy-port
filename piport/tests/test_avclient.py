@@ -2803,6 +2803,185 @@ class TestOnvifChannelGeometry(unittest.TestCase):
         self.assertEqual(video["video1"], video["video2"])
         self.assertEqual(video["video1"], video["video3"])
 
+    def test_transcode_reports_what_each_encoder_makes(self):
+        # Live 2026-11-04 09:20: video2 encoded at 2000 kbps, reported at 1000000.
+        import onvif_push
+        self.profiles = [
+            {"token": "P1", "encoding": "H264", "width": 2560, "height": 1440, "fps": 20,
+             "url": "rtsp://cam/101"},
+            {"token": "P2", "encoding": "H264", "width": 1280, "height": 720, "fps": 20,
+             "url": "rtsp://cam/102"}]
+        with mock.patch.object(onvif_push, "TRANSCODE", True):
+            av._onvif.set_source("CAMX", "rtsp://cam/101", width=2560, height=1440, fps=20)
+            video = self._reply()
+        got = {c: (v["width"], v["height"], v["fps"], v["bitrate"]) for c, v in video.items()}
+        self.assertEqual(got, {"video1": (2560, 1440, 20, 4000000),
+                               "video2": (1280, 720, 20, 2000000),
+                               "video3": (640, 360, 20, 500000)})
+
+    def test_transcode_size_beats_a_different_probe_in_the_reply(self):
+        import onvif_push
+        av._stream_probe["CAMX"] = {"width": 1920, "height": 1080, "fps": 15}
+        self.addCleanup(lambda: av._stream_probe.pop("CAMX", None))
+        with mock.patch.object(onvif_push, "TRANSCODE", True):
+            av._onvif.set_source("CAMX", "rtsp://cam/101", width=2560, height=1440, fps=20)
+            video = self._reply()
+        self.assertEqual((video["video1"]["width"], video["video1"]["height"]), (2560, 1440))
+
+    def _start_camera(self, start_stream):
+        ws = _FakeWS()
+        with mock.patch.object(av, "_start_stream", side_effect=start_stream), \
+                mock.patch.object(av, "_start_motion_detector"), \
+                mock.patch.object(av, "_start_status_watch"):
+            av.handle_function(ws, {"functionName": "OnvifStreamControl", "messageId": "m",
+                                    "payload": {"deviceID": "CAMX", "streaming": True,
+                                                "streamUrl": "rtsp://cam/101", "width": 2560,
+                                                "height": 1440, "fps": 20}}, {})
+        self.addCleanup(lambda: (av._stream_probe.pop("CAMX", None),
+                                 av._stream_points.pop("CAMX", None),
+                                 av._stream_started_at.pop("CAMX", None)))
+        return av._onvif.source("CAMX")
+
+    def test_camera_is_encoded_at_its_probed_size(self):
+        # The encoder and the reply must agree, and the reply prefers what's really there.
+        def probed(*a, **k):
+            av._stream_probe["CAMX"] = {"width": 1920, "height": 1080}
+        src = self._start_camera(probed)
+        self.assertEqual((src["width"], src["height"], src["fps"]), (1920, 1080, 20))
+
+    def test_failed_probe_keeps_the_size_already_set(self):
+        # A change of size would restart the pipeline.
+        av._onvif.set_source("CAMX", "rtsp://cam/101", width=1920, height=1080, fps=20)
+        src = self._start_camera(lambda *a, **k: av._stream_probe.pop("CAMX", None))
+        self.assertEqual((src["width"], src["height"]), (1920, 1080))
+
+    def test_first_failed_probe_uses_the_announced_size(self):
+        src = self._start_camera(lambda *a, **k: None)
+        self.assertEqual((src["width"], src["height"]), (2560, 1440))
+
+    def test_video_is_set_up_when_detection_fails_to_start(self):
+        src = self._start_camera(OSError("no ffmpeg"))
+        self.assertEqual(src["url"], "rtsp://cam/101")
+
+
+class TestRefusalWatch(unittest.TestCase):
+    """Protect hanging up on an adopted AI Port says nothing, so pi-port has to notice.
+    Live 2026-11-02 19:30: 699 closes in a row, each a generic ConnectionClosedError."""
+
+    def setUp(self):
+        self.now = [1000.0]
+        self.watch = av._RefusalWatch(180, clock=lambda: self.now[0])
+
+    def _refused(self, closes=1, step=5.0, adopted=True):
+        for _ in range(closes):
+            self.watch.connected()
+            self.watch.ended(adopted)
+            self.now[0] += step
+
+    def test_warns_once_after_the_threshold_and_names_the_file(self):
+        with self.assertNoLogs(av.log, "WARNING"):
+            self._refused(36)           # 175 s
+        with self.assertLogs(av.log, "WARNING") as logs:
+            self._refused()             # 180 s
+        self.assertIn("removed in Protect", logs.output[0])
+        self.assertIn(av.ADOPT_STATE_FILE, logs.output[0])
+        with self.assertNoLogs(av.log, "WARNING"):
+            self._refused(50)
+
+    def test_a_reconnect_that_settles_does_not_warn(self):
+        # Live 2026-11-03 09:37: 16 closes over 78 s, then Protect answered.
+        with self.assertNoLogs(av.log, "WARNING"):
+            self._refused(16)
+            self.watch.connected()
+            self.watch.heard()
+            self.watch.ended(True)
+            self._refused(36)
+
+    def test_says_when_protect_answers_again_and_can_warn_again(self):
+        with self.assertLogs(av.log, "WARNING"):
+            self._refused(40)
+        self.watch.connected()
+        with self.assertLogs(av.log, "INFO") as logs:
+            self.watch.heard()
+        self.assertIn("answering", logs.output[0])
+        self.watch.ended(True)
+        with self.assertLogs(av.log, "WARNING"):
+            self._refused(40)
+
+    def test_before_adoption_closes_are_normal(self):
+        # Live 2026-11-02: 26 closes until adoption at 20:37.
+        with self.assertNoLogs(av.log, "WARNING"):
+            self._refused(100, adopted=False)
+
+    def test_a_console_that_is_down_restarts_the_count(self):
+        with self.assertNoLogs(av.log, "WARNING"):
+            self._refused(30)
+            self.watch.ended(True)      # never opened: nothing is listening
+            self.now[0] += 600
+            self._refused(30)
+
+    def test_can_be_turned_off(self):
+        self.watch.warn_s = 0
+        with self.assertNoLogs(av.log, "WARNING"):
+            self._refused(100)
+
+    def _run(self, frames, watch):
+        ws = mock.MagicMock(subprotocol=None)
+        ws.__iter__.return_value = iter(frames)
+        conn = mock.MagicMock()
+        conn.__enter__.return_value = ws
+        info = {k: "x" for k in ("mac_nosep", "ip", "sysid_hex", "type", "version", "device_id",
+                                 "guid")}
+        self.addCleanup(setattr, av, "_status_ws", av._status_ws)
+        with mock.patch.object(av, "connect", return_value=conn), \
+                mock.patch.object(av, "build_ssl_context"), \
+                mock.patch.object(av, "send_msg"), \
+                mock.patch.object(av, "_refusals", watch):
+            av.run("console", 7442, info)
+
+    def test_run_tells_the_watch_what_happened(self):
+        self._run([], self.watch)
+        self.assertTrue(self.watch._open)
+        self.assertFalse(self.watch._heard)
+        frame = json.dumps({"inResponseTo": "1", "payload": {}})
+        self._run([frame], self.watch)
+        self.assertTrue(self.watch._heard)
+
+
+class TestRestreamHealth(unittest.TestCase):
+    """A restream that stops is logged on its own: _camera_health only sees detection."""
+
+    def setUp(self):
+        saved = av._onvif
+        av._onvif = mock.Mock()
+        av._onvif.has_source.return_value = True
+        self.addCleanup(lambda: setattr(av, "_onvif", saved))
+        self.addCleanup(av._restream_stalled.clear)
+
+    def _check(self, stalled):
+        av._onvif.stalled_channels.return_value = stalled
+        av._check_restream()
+
+    def test_warns_once_then_on_change_then_says_it_recovered(self):
+        with self.assertLogs(av.log, "WARNING") as logs:
+            self._check({"CAM": ["video1"]})
+        self.assertIn("no video to Protect on video1", logs.output[0])
+        with self.assertNoLogs(av.log, "INFO"):
+            self._check({"CAM": ["video1"]})
+        with self.assertLogs(av.log, "WARNING") as logs:
+            self._check({"CAM": ["video1", "video3"]})
+        self.assertIn("video1, video3", logs.output[0])
+        with self.assertLogs(av.log, "INFO") as logs:
+            self._check({})
+        self.assertIn("video to Protect again", logs.output[0])
+
+    def test_a_stopped_camera_is_not_called_recovered(self):
+        self._check({"CAM": ["video1"]})
+        av._onvif.has_source.return_value = False
+        with self.assertNoLogs(av.log, "INFO"):
+            self._check({})
+        self.assertEqual(av._restream_stalled, {})
+
 
 class _FakeWS:
     def __init__(self):

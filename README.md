@@ -388,8 +388,25 @@ comma-separated list of device IDs (MACs) such as `80BEAF928356,F4E2C60D4B4C`.
 | Not selected (default) | `ffmpeg` copies the camera's main stream and substream | 3, with detection | The camera's own |
 | Selected (macOS only) | One `gst-launch` decodes the main stream once and encodes each channel with VideoToolbox, as the real AI Port does | 2, with detection | `video1` main size at 4000 kbps, `video2` substream size at 2000 kbps, `video3` 360 lines at 500 kbps |
 
+Protect doesn't always tell pi-port it was removed: it just closes each connection without
+a message. An adopted instance logs `was this AI Port removed in Protect?` once this has
+gone on for `AIPORT_REFUSED_WARN_S` seconds (default 180, `0` turns this off). It doesn't
+clear the adoption itself, since a console problem could look the same.
+
 Selected cameras need `brew install gstreamer`. On an M1 Pro one used about 11% of
 one core and up to about 290 MB, against about 1% and 11 MB when not selected.
+
+The video and detection restart separately: each has its own camera pull, so losing
+one leaves the other running. A selected camera's pipeline is replaced when a channel
+has produced no video for `AIPORT_ONVIF_STALL_S` seconds (default 30, `0` turns this
+off). A settings re-send from Protect reconnects only that channel's push, unless a
+channel has been silent for 5 s. On either kind of camera, the log warns
+`restream: no video to Protect` when a channel has delivered nothing for
+`AIPORT_STREAM_STALL_S` seconds.
+
+If the camera's ONVIF profiles can't be read, pi-port tries again: twice within a few
+seconds, then every 30 s, 2 minutes and 10 minutes. Until it succeeds, `video2` and
+`video3` use the main stream.
 
 Verified on a Raspberry Pi 5 (Docker, Coral) with a Hikvision 4K camera and
 Protect 7.2: live view in the app and browser, recording, and smart-detect

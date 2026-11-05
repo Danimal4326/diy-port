@@ -4228,6 +4228,25 @@ def _restart_stalled_pulls(now_ms=None):
     return killed
 
 
+_restream_stalled = {}  # deviceID -> channels last reported as delivering nothing
+
+
+def _check_restream(now=None):
+    """Log when a camera's restream stops or resumes delivering video to Protect. Its health
+    is apart from detection's: during the 2.5 h hang of live 2026-11-03 17:24 a camera's
+    detection could run on while Protect got no video, and _camera_health only sees detection."""
+    stalled = _onvif.stalled_channels(STREAM_STALL_S, now)
+    for device_id, channels in stalled.items():
+        if _restream_stalled.get(device_id) != channels:
+            log.warning("camera deviceID=%s restream: no video to Protect on %s for %.0f s",
+                        device_id, ", ".join(channels), STREAM_STALL_S)
+            _restream_stalled[device_id] = channels
+    for device_id in [d for d in _restream_stalled if d not in stalled]:
+        del _restream_stalled[device_id]
+        if _onvif.has_source(device_id):  # otherwise Protect stopped the camera: no news
+            log.info("camera deviceID=%s restream: video to Protect again", device_id)
+
+
 def _check_status(ws, now=None):
     """Send EventAIPortStatus for each paired camera whose health changed."""
     now = time.monotonic() if now is None else now
@@ -4258,6 +4277,10 @@ def _start_status_watch():
                 _restart_stalled_pulls()
             except Exception:
                 log.exception("stalled pull check failed")
+            try:
+                _check_restream()
+            except Exception:
+                log.exception("restream check failed")
             ws = _status_ws
             if ws is None:
                 continue
@@ -4384,6 +4407,18 @@ def _apply_motion_settings(payload):
         _motion_detectors.pop(device_id, None)
 
 
+def _onvif_main_size(device_id, payload):
+    """(width, height) an ONVIF camera's main stream is pushed at: as probed, else as already
+    set (a failed probe must not change the size and so restart a transcode), else as announced."""
+    probe = _stream_probe.get(device_id) or {}
+    if probe.get("width") and probe.get("height"):
+        return probe["width"], probe["height"]
+    src = _onvif.source(device_id) or {}
+    if src.get("width") and src.get("height"):
+        return src["width"], src["height"]
+    return payload.get("width"), payload.get("height")
+
+
 def _stop_all_streams(preserve_tracks=False):
     for device_id in list(set(_active_streams) | set(_stream_points)):
         _stop_stream(device_id)
@@ -4468,12 +4503,17 @@ def handle_function(ws, msg, device_info):
         reply_status = "stopped"
         if device_id and payload.get("streaming") and url:
             try:
-                _onvif.set_source(device_id, url, audio=payload.get("audio", True),
-                                  width=payload.get("width"), height=payload.get("height"),
-                                  fps=payload.get("fps"))
                 _stream_restart_count.pop(device_id, None)
-                _start_stream(device_id, None, None, None, payload.get("width"),
-                              payload.get("height"), url=url)
+                try:
+                    _start_stream(device_id, None, None, None, payload.get("width"),
+                                  payload.get("height"), url=url)
+                finally:
+                    # After the probe: a transcode encodes at this size and Protect is told it,
+                    # so the camera's real size beats the announced one. Detection failing to
+                    # start must not cost the camera its video.
+                    width, height = _onvif_main_size(device_id, payload)
+                    _onvif.set_source(device_id, url, audio=payload.get("audio", True),
+                                      width=width, height=height, fps=payload.get("fps"))
                 _start_motion_detector(ws, device_id, None, None, None, preserve_tracks=True)
                 # Counted, health-watched and stall-checked like a UiStreamControl camera.
                 _stream_points[device_id] = _stream_points_for(
@@ -4532,6 +4572,7 @@ def handle_function(ws, msg, device_info):
         if payload.get("deviceID") and isinstance(payload.get("video"), dict):
             _onvif.configure(payload["deviceID"], payload["video"])
             onvif_src = _onvif.source(payload["deviceID"])
+            _onvif.wait_for_substream(payload["deviceID"])
         if onvif_src:
             # Channels carry the camera's main stream (video2/video3 its substream, if it
             # has one), so report their real geometry -- the main one probed, since Protect
@@ -4548,9 +4589,9 @@ def handle_function(ws, msg, device_info):
                            "fps": sub["fps"] or channel["fps"], "bitrate": 1000000} if sub else None
             video = {k: dict(sub_channel if sub and k in onvif_push.SUB_CHANNELS else channel)
                      for k in payload["video"]}
-            video3 = _onvif.transcode_video3(payload["deviceID"])
-            if video3 and "video3" in video:
-                video["video3"].update(video3)
+            encoded = _onvif.transcode_channels(payload["deviceID"]) or {}
+            for k in video:
+                video[k].update(encoded.get(k) or {})
             send_msg(ws, "ChangeVideoSettings", {
                 "video": video,
                 "audio": {"enabled": True, "volume": 100},
@@ -4740,6 +4781,64 @@ def _adopt_token():
 # No wait-for-adopt gate: the unsolicited pre-adopt connection is load-bearing for candidate identity.
 
 
+# An adopted AI Port that Protect has been hanging up on, without a word, for this long is
+# probably no longer adopted (0: never warn). Protect sends no reason, and ResetToDefaults only
+# comes if we're connected at the moment of the removal: it isn't once in the log from
+# 2026-10-28 through four removals. Live 2026-11-02 19:30 on the ONVIF test instance: 699 closes
+# in a row with a token in adopt_state.json, each a generic ConnectionClosedError. Ordinary
+# reconnects settled sooner (65-78 s on 2026-11-03 and 2026-11-04), so this waits longer.
+REFUSED_WARN_S = float(os.environ.get("AIPORT_REFUSED_WARN_S") or 180)
+
+
+class _RefusalWatch:
+    """Notices when Protect keeps accepting our connection and closing it with nothing said.
+    A connection that never opens means the console is down, so it starts the count again."""
+
+    def __init__(self, warn_s=REFUSED_WARN_S, clock=time.monotonic):
+        self.warn_s = warn_s
+        self.clock = clock
+        self._open = self._heard = self._warned = False
+        self._since = None
+        self._closes = 0
+
+    def _reset(self):
+        self._since, self._closes, self._warned = None, 0, False
+
+    def connected(self):
+        self._open, self._heard = True, False
+
+    def heard(self):
+        """Any frame from Protect, on the first one of a connection."""
+        if self._heard:
+            return
+        self._heard = True
+        if self._warned:
+            log.info("Protect is answering this AI Port again")
+        self._reset()
+
+    def ended(self, adopted):
+        """After each attempt. `adopted`: adopt_state.json had a token or hosts for it. Before
+        adoption these closes are normal: 2026-11-02 had 26 of them until adoption at 20:37."""
+        opened, self._open = self._open, False
+        if not opened or not adopted:
+            self._reset()
+            return
+        if self._heard:
+            return
+        now = self.clock()
+        self._since = now if self._since is None else self._since
+        self._closes += 1
+        if self.warn_s and not self._warned and now - self._since >= self.warn_s:
+            self._warned = True
+            log.warning("Protect has closed the last %d connections right after they opened, "
+                        "over %.0f s, without a message: was this AI Port removed in Protect? "
+                        "If so, move %s aside and adopt it again", self._closes,
+                        now - self._since, ADOPT_STATE_FILE)
+
+
+_refusals = _RefusalWatch()
+
+
 def run(host, port, device_info, token=None):
     # connectionHost must be the controller's (Protect builds camera-upload URLs
     # from it), not ours -- self-IP left paired cameras without thumbnails.
@@ -4766,6 +4865,7 @@ def run(host, port, device_info, token=None):
     with connect(url, subprotocols=["secure_transfer"], additional_headers=headers,
                  ssl=ctx, open_timeout=15) as ws:
         log.info("CLASSIC AVCLIENT WSS CONNECTED (subprotocol=%s)", ws.subprotocol)
+        _refusals.connected()
         global _status_ws
         _status_ws = ws
         # hwrev must be non-null or hardwareRevision stays empty; 1 is a placeholder.
@@ -4800,6 +4900,7 @@ def run(host, port, device_info, token=None):
         }, response_expected=True)
 
         for raw in ws:
+            _refusals.heard()
             # Controller sends JSON as BINARY frames; decode bytes as UTF-8 JSON.
             text = raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
             try:
@@ -4965,6 +5066,7 @@ def main():
             log.warning("classic avclient connection closed cleanly by peer")
         except Exception as e:
             log.warning("classic avclient connection ended: %r", e)
+        _refusals.ended(bool(token or hosts))
         # Always pace reconnects; a clean close must not skip the sleep (rate limiter is 60 msgs/60s).
         elapsed = time.time() - start
         time.sleep(max(0.0, 5.0 - elapsed))

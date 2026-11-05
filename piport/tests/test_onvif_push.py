@@ -293,11 +293,125 @@ class TestPushManager(unittest.TestCase):
         with mock.patch.object(onvif_push, "TRANSCODE", True):
             self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video3", "S3")})
             self.m.set_source("CAM", "rtsp://cam/101", width=2560, height=1440, fps=20)
-            self.assertEqual(self.m.transcode_video3("CAM"), {"width": 640, "height": 360})
+            self.assertEqual(self.m.transcode_channels("CAM")["video3"],
+                             {"width": 640, "height": 360, "fps": 20, "bitrate": 500000})
         self.assertEqual(self.started[0].renditions, (("video1", 2560, 1440, 20, 4000, 20),
                                                       ("video2", 1280, 720, 20, 2000, 24),
                                                       ("video3", 640, 360, 20, 500, 24)))
-        self.assertIsNone(self.m.transcode_video3("CAM"))  # only under TRANSCODE
+        self.assertIsNone(self.m.transcode_channels("CAM"))  # only under TRANSCODE
+
+    def test_transcode_channels_leave_out_what_is_unknown(self):
+        with mock.patch.object(onvif_push, "TRANSCODE", True):
+            self.assertIsNone(self.m.transcode_channels("CAM"))  # no source yet
+            self.m.set_source("CAM", "rtsp://cam/101")
+            self.assertEqual(self.m.transcode_channels("CAM")["video2"], {"bitrate": 2000000})
+
+    def test_stalled_channels_are_the_pushes_with_nothing_sent(self):
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video3", "S3")})
+        self.started[0].last_sent, self.started[1].last_sent = 100.0, 120.0
+        self.assertEqual(self.m.stalled_channels(30, now=125.0), {})
+        self.assertEqual(self.m.stalled_channels(30, now=130.0), {"CAM": ["video1"]})
+        self.assertEqual(self.m.stalled_channels(30, now=150.0), {"CAM": ["video1", "video3"]})
+
+    def test_a_re_send_does_not_make_a_silent_channel_look_healthy(self):
+        # Live 2026-11-03 17:24: Protect re-sent every ~13 s, and each re-send makes a new push.
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.m.configure("CAM", _settings("video1", "S1"))
+        self.started[0].last_sent = 50.0
+        self.m.configure("CAM", _settings("video1", "S1"))
+        self.assertEqual(self.started[1].last_sent, 50.0)
+        self.assertEqual(self.m._last_sent, {})
+
+    def test_stopping_forgets_what_a_re_send_kept(self):
+        self.m._last_sent[("CAM", "video1")] = 50.0
+        self.m.stop_device("CAM")
+        self.assertEqual(self.m._last_sent, {})
+
+    def _failing_then(self, *results):
+        """fetch_profiles raising or returning `results` in turn."""
+        results = iter(results)
+
+        def fetch(url):
+            result = next(results)
+            if isinstance(result, Exception):
+                raise result
+            return result
+        self.m._fetch_profiles = fetch
+
+    def test_quick_retry_leaves_a_brief_failure_with_no_effect(self):
+        # Live 2026-11-04 19:23:39: "No route to host", reachable 2 s later.
+        self._two_profiles()
+        good, self.profiles = self.profiles, []
+        self._failing_then(OSError("no route"), good)
+        self.m._background = True
+        self.m._looking_up.add("rtsp://cam/101")
+        with mock.patch.object(onvif_push.time, "sleep") as sleep, \
+                mock.patch.object(onvif_push.threading, "Timer") as timer:
+            self.m._find_substream("rtsp://cam/101")
+        sleep.assert_called_once_with(onvif_push.PROFILE_QUICK_RETRY_S[0])
+        timer.assert_not_called()
+        self.assertEqual(self.m._subs["rtsp://cam/101"]["url"], "rtsp://cam/102")
+
+    def test_failed_lookup_keeps_trying_with_longer_waits(self):
+        self.m._background = True
+        self.m._sources["CAM"] = {"url": "rtsp://cam/101", "audio": True, "width": None,
+                                  "height": None, "fps": None}
+        self._failing_then(*[OSError("no route")] * 20)
+        waits = []
+        with mock.patch.object(onvif_push.time, "sleep"), \
+                mock.patch.object(onvif_push.threading, "Timer") as timer:
+            self.m._find_substream("rtsp://cam/101")
+            for late in range(1, 5):
+                waits.append(timer.call_args.args[0])
+                self.assertEqual(timer.call_args.kwargs["args"], ("rtsp://cam/101", late))
+                self.m._find_substream("rtsp://cam/101", late)
+        self.assertEqual(waits, [30.0, 120.0, 600.0, 600.0])
+        self.assertTrue(timer.return_value.daemon)
+
+    def test_a_late_lookup_moves_the_channels_to_the_substream(self):
+        self.profiles = OSError("no route")
+        self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video2", "S2")})
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.assertEqual(self._pushed(), {"video1": "rtsp://cam/101", "video2": "rtsp://cam/101"})
+        self._two_profiles()
+        self.m._find_substream("rtsp://cam/101", late=1)
+        self.assertEqual(self._pushed(), {"video1": "rtsp://cam/101", "video2": "rtsp://cam/102"})
+
+    def test_a_camera_without_a_substream_is_not_looked_up_again(self):
+        self.m._background = True
+        self.m._sources["CAM"] = {"url": "rtsp://cam/101", "audio": True, "width": None,
+                                  "height": None, "fps": None}
+        self.profiles = []
+        with mock.patch.object(onvif_push.threading, "Timer") as timer:
+            self.m._find_substream("rtsp://cam/101")
+        timer.assert_not_called()
+
+    def test_retries_stop_once_nothing_uses_the_camera(self):
+        self.m._background = True
+        self._failing_then(*[OSError("no route")] * 3)
+        with mock.patch.object(onvif_push.time, "sleep"), \
+                mock.patch.object(onvif_push.threading, "Timer") as timer:
+            self.m._find_substream("rtsp://cam/101", late=1)
+        timer.assert_not_called()
+        self.assertNotIn("rtsp://cam/101", self.m._subs)   # the next set_source looks it up
+
+    def test_wait_for_substream(self):
+        self.m._sources["CAM"] = {"url": "rtsp://cam/101"}
+        self.m._looking_up.add("rtsp://cam/101")
+        started = time.monotonic()
+        self.m.wait_for_substream("CAM", timeout=0.05)     # gives up at the timeout
+        self.assertGreaterEqual(time.monotonic() - started, 0.04)
+
+        def finish():
+            time.sleep(0.05)
+            self.m._find_substream("rtsp://cam/101")
+        threading.Thread(target=finish, daemon=True).start()
+        started = time.monotonic()
+        self.m.wait_for_substream("CAM", timeout=5)
+        self.assertLess(time.monotonic() - started, 4)
+        self.m.wait_for_substream("UNKNOWN", timeout=5)    # no such camera: no wait
+        self.assertLess(time.monotonic() - started, 4)
 
     def test_transcode_is_per_camera(self):
         self._two_profiles()
@@ -306,8 +420,9 @@ class TestPushManager(unittest.TestCase):
             for device in ("CAM", "OTHER"):
                 self.m.configure(device, settings)
                 self.m.set_source(device, f"rtsp://{device}/101", width=2560, height=1440, fps=20)
-            self.assertEqual(self.m.transcode_video3("CAM"), {"width": 640, "height": 360})
-            self.assertIsNone(self.m.transcode_video3("OTHER"))
+            self.assertEqual(self.m.transcode_channels("CAM")["video1"],
+                             {"width": 2560, "height": 1440, "fps": 20, "bitrate": 4000000})
+            self.assertIsNone(self.m.transcode_channels("OTHER"))
         pushes = {p.args[:2]: p for p in self.started if not p.stop.called}
         self.assertIsNotNone(pushes["CAM", "video1"].renditions)
         self.assertIsNone(pushes["OTHER", "video1"].renditions)
@@ -533,6 +648,93 @@ class TestTranscode(unittest.TestCase):
             runner.join(timeout=10)
         self.assertFalse(runner.is_alive())
         self.assertIsNotNone(pull._proc.poll())
+
+    def _pull(self, *channels):
+        pull = onvif_push.TranscodePull("rtsp://cam/101", False, tuple(
+            (c, 2560, 1440, 20, 4000, 20) for c in channels))
+        pull._proc = mock.Mock(pid=1)
+        pull._proc.poll.return_value = None
+        return pull
+
+    def test_re_send_leaves_a_pipeline_that_is_producing(self):
+        # A restart costs all three channels; a push reconnect is enough while frames flow.
+        pull = self._pull("video1", "video3")
+        now = time.monotonic()
+        pull._restarted = now - 60
+        for out in pull.outputs.values():
+            out._last_video = now
+        self.assertFalse(pull.restart("re-send"))
+        self.assertFalse(pull._restart.is_set())
+        pull.outputs["video3"]._last_video = now - onvif_push.RESEND_RESTART_QUIET_S - 1
+        self.assertTrue(pull.restart("re-send"))
+        self.assertTrue(pull._restart.is_set())
+
+    def test_silent_channels_count_from_the_pipeline_start(self):
+        pull = self._pull("video1", "video3")
+        pull._restarted = 100.0
+        pull.outputs["video1"]._last_video = 125.0
+        pull.outputs["video3"]._last_video = 90.0   # from before this pipeline
+        self.assertEqual(pull.silent_channels(30, now=129.0), [])
+        self.assertEqual(pull.silent_channels(30, now=131.0), ["video3"])
+        self.assertEqual(pull.silent_channels(30, now=156.0), ["video1", "video3"])
+
+    def test_watchdog_replaces_a_pipeline_with_no_output(self):
+        # Live 2026-11-03 17:24: gst-launch alive, no output for 2.5 h. No re-send here.
+        pull = onvif_push.TranscodePull("rtsp://cam/101", False,
+                                        (("video1", 2560, 1440, 20, 4000, 20),))
+        with mock.patch.object(onvif_push, "transcode_cmd", return_value=["sleep", "30"]), \
+                mock.patch.object(onvif_push, "TRANSCODE_STALL_S", 0.2):
+            started = time.monotonic()
+            self.assertFalse(pull._pull_once(1))
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIsNotNone(pull._proc.poll())
+
+    def test_watchdog_can_be_turned_off(self):
+        pull = onvif_push.TranscodePull("rtsp://cam/101", False,
+                                        (("video1", 2560, 1440, 20, 4000, 20),))
+        with mock.patch.object(onvif_push, "transcode_cmd", return_value=["sleep", "30"]), \
+                mock.patch.object(onvif_push, "TRANSCODE_STALL_S", 0):
+            runner = threading.Thread(target=pull._pull_once, args=(1,), daemon=True)
+            runner.start()
+            time.sleep(1.5)
+            self.assertTrue(runner.is_alive())
+            pull._stop.set()
+            pull._proc.terminate()
+            runner.join(timeout=10)
+        self.assertFalse(runner.is_alive())
+
+    def test_only_video_counts_as_output(self):
+        # Silent AAC keeps flowing from its own branch when the video stops.
+        pull = onvif_push.SharedPull("rtsp://cam/101")
+        pull._frames = 0
+        flv = b"FLV\x01\x05\0\0\0\x09\0\0\0\0"
+        audio = onvif_push._flv_tag(onvif_push._TAG_AUDIO, bytes([0x70, 0]), 0)
+        pull._consume(io.BytesIO(flv + audio).read)
+        self.assertIsNone(pull._last_video)
+        video = onvif_push._flv_tag(onvif_push._TAG_VIDEO, bytes([0x27, 1, 0, 0, 0]), 50)
+        pull._consume(io.BytesIO(flv + video).read)
+        self.assertIsNotNone(pull._last_video)
+
+    def test_push_notes_each_video_frame_it_sends(self):
+        ours, protect = socket.socketpair()
+        self.addCleanup(protect.close)
+        push = onvif_push.FlvPush("CAM", "video1", "rtsp://cam/101", "S", "tcp://h:1",
+                                  pool=mock.Mock())
+        push.STALL_S = 0.05
+        push.last_sent = 0.0
+        flv = b"FLV\x01\x05\0\0\0\x09\0\0\0\0"
+        tag = onvif_push._flv_tag(onvif_push._TAG_AUDIO, bytes([0x70, 0]), 0)
+        push.put(("tag", tag[:11], tag[11:]))
+        with mock.patch.object(onvif_push.socket, "create_connection", return_value=ours):
+            push._push_once(("start", flv, [], 0), 1)
+        self.assertEqual(push.last_sent, 0.0)   # audio isn't video
+        ours, protect2 = socket.socketpair()
+        self.addCleanup(protect2.close)
+        tag = onvif_push._flv_tag(onvif_push._TAG_VIDEO, bytes([0x27, 1, 0, 0, 0]), 50)
+        push.put(("tag", tag[:11], tag[11:]))
+        with mock.patch.object(onvif_push.socket, "create_connection", return_value=ours):
+            push._push_once(("start", flv, [], 0), 2)
+        self.assertGreater(push.last_sent, 0.0)
 
     def test_restart_source_only_touches_a_transcode(self):
         push = onvif_push.FlvPush("CAM", "video1", "rtsp://cam/101", "S", "tcp://h:1",

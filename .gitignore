@@ -43,4 +43,3 @@ docker/.env
 
 # Apple vehicle-attribute helper, built on first use
 /diyport/apple/build/
-CLAUDE.local.md

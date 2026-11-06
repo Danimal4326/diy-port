@@ -682,7 +682,7 @@ def _hw_scale_mode(hwdec_args, device_id=None):
     return "vt" if "videotoolbox" in hwdec_args else "vt_upload"
 
 
-def _pull_video_args(codec, det_w, det_h, device_id=None, direct=False):
+def _pull_video_args(codec, det_w, det_h, device_id=None, direct=False, rate=None):
     """(ffmpeg args before -i, filter graph, GPU scaling mode, JPEG every Nth frame) for a
     stream of this codec (`direct`: from the camera, not Protect's relay). replay.py builds
     its pull from this too."""
@@ -693,10 +693,11 @@ def _pull_video_args(codec, det_w, det_h, device_id=None, direct=False):
         pre += ["-hwaccel_output_format", "videotoolbox_vld"]
     elif hw == "vt_upload":
         pre += ["-init_hw_device", "videotoolbox=vt", "-filter_hw_device", "vt"]
-    return pre, _detect_filter_graph(det_w, det_h, hw, FRAME_JPEG_EVERY), hw, FRAME_JPEG_EVERY
+    return (pre, _detect_filter_graph(det_w, det_h, hw, FRAME_JPEG_EVERY, rate), hw,
+            FRAME_JPEG_EVERY)
 
 
-def _detect_filter_graph(width=DETECT_IMG_SIZE, height=None, hw=None, jpeg_every=1):
+def _detect_filter_graph(width=DETECT_IMG_SIZE, height=None, hw=None, jpeg_every=1, rate=None):
     """ffmpeg filter graph for the detection pipeline: [jpg] full-res frames (every
     `jpeg_every`th one), [det] all of them scaled for the detector, on the GPU for hw
     'vt'/'vt_upload'. replay.py runs clips through this same graph."""
@@ -709,7 +710,56 @@ def _detect_filter_graph(width=DETECT_IMG_SIZE, height=None, hw=None, jpeg_every
         det = f"format=nv12,hwupload,scale_vt={width}:{height},hwdownload,format=nv12"
     else:
         det = f"scale={width}:{height}"
-    return f"[0:v]fps={DETECT_FPS},split=2[jpgin][detin];[jpgin]{jpg}[jpg];[detin]{det}[det]"
+    rate = rate or f"fps={DETECT_FPS}"
+    return f"[0:v]{rate},split=2[jpgin][detin];[jpgin]{jpg}[jpg];[detin]{det}[det]"
+
+
+def _shared_decode_source(device_id, url):
+    """(socket path, analyse every Kth frame) to decode this ONVIF camera's pushed video1
+    (AIPORT_ONVIF_SHARED_DECODE), or None to pull the camera as before."""
+    if not (onvif_push.SHARED_DECODE and onvif_push.transcodes(device_id)):
+        return None
+    # OnvifStreamControl starts detection before set_source, so the source may not be known.
+    src = _onvif.source(device_id) or {}
+    if src.get("url") not in (None, url):
+        return None
+    fps = src.get("fps") or (_stream_probe.get(device_id) or {}).get("fps") or 20
+    return onvif_push.detect_socket(url), max(1, round(float(fps) / DETECT_FPS))
+
+
+def _feed_shared_decode(device_id, proc, sock_path, every, walls):
+    """Copies the pushed video1 from its DetectServer into ffmpeg, queueing the wall time
+    of every `every`th video frame for the frame reader. Our encoder never reorders frames
+    (allow-frame-reordering=false), so each video tag decodes to one picture, in order."""
+    import socket as socketlib
+    sock = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
+    frames = 0
+    try:
+        # The transcode (and its socket) starts after detection: wait for it.
+        for attempt in range(30):
+            try:
+                sock.connect(sock_path)
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                if attempt == 29 or proc.poll() is not None:
+                    raise
+                time.sleep(0.5)
+        f = sock.makefile("rb", buffering=0)
+        for kind, wall, data in onvif_push.read_detect_records(f.read):
+            if kind == onvif_push.DETECT_FRAME:
+                if frames % every == 0:
+                    walls.append(wall)
+                frames += 1
+            proc.stdin.write(data)
+    except (OSError, ValueError) as exc:
+        log.info("shared decode feed for deviceID=%s ended: %r", device_id, exc)
+    finally:
+        sock.close()
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+    log.info("shared decode feed for deviceID=%s ended after %d frames", device_id, frames)
 
 
 # One ffmpeg pulls RTSP and splits post-decode into a full-res JPEG and an RGB detection
@@ -725,23 +775,33 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
     out_path = os.path.join(_STREAM_DIR, f"{device_id}.jpg")
     probe = _probe_stream(url)
     _stream_probe[device_id] = probe
+    shared = _shared_decode_source(device_id, url) if direct else None
     if probe["width"] and probe["height"]:
         # What the stream really is beats what the controller announced.
         _stream_dims[device_id] = (probe["width"], probe["height"])
     codec = probe["codec"]
     det_w, det_h = _detect_dims(width, height)
+    rate = input_args = None
+    if shared:
+        # Every Kth frame by count, not fps= by timestamp, so output frame n is input frame
+        # n*K and takes that frame's wall time (_feed_shared_decode).
+        sock_path, every = shared
+        codec, rate = "h264", f"select=not(mod(n\\,{every}))"
     pre_args, graph, hw, jpeg_every = _pull_video_args(codec, det_w, det_h, device_id,
-                                                       direct=direct)
+                                                       direct=direct, rate=rate)
+    if shared:
+        input_args = [*pre_args, "-flags", "low_delay", "-f", "flv", "-i", "pipe:0"]
     encode_args = ["-c:v", "mjpeg_rkmpp"] if FFMPEG_BIN != "ffmpeg" else ["-c:v", "mjpeg"]
     # Plate/face reads use the snapshot file, so refresh it every second when they're on.
     snap_interval = 1.0 if enrich.smart_detect_features() else 2.0
     jpeg_r, jpeg_w = os.pipe()
     cmd = [
-        FFMPEG_BIN, "-loglevel", "warning", "-rtsp_transport", "tcp", *_rtsp_timeout_args(),
-        # Low-latency decode (no B-frame reorder delay). Not "-fflags nobuffer": with this
-        # split/fps pipeline it left the rawvideo detection output empty (ffmpeg 8).
-        "-flags", "low_delay",
-        *pre_args, "-i", url,
+        FFMPEG_BIN, "-loglevel", "warning", *(input_args or [
+            "-rtsp_transport", "tcp", *_rtsp_timeout_args(),
+            # Low-latency decode (no B-frame reorder delay). Not "-fflags nobuffer": with this
+            # split/fps pipeline it left the rawvideo detection output empty (ffmpeg 8).
+            "-flags", "low_delay",
+            *pre_args, "-i", url]),
         "-filter_complex", graph,
         # Passthrough on both outputs: per-output constant-rate padding drifted JPEG n from
         # detection frame n by up to 2.6 s.
@@ -753,9 +813,14 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
              "JPEG every %d frames)", device_id, url, codec, hw or "off", jpeg_every)
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                stdin=subprocess.PIPE if shared else subprocess.DEVNULL,
                                 pass_fds=(jpeg_w,))
     finally:
         os.close(jpeg_w)
+    walls = collections.deque()  # shared decode: wall ms of each frame ffmpeg will output
+    if shared:
+        threading.Thread(target=_feed_shared_decode, args=(device_id, proc, *shared, walls),
+                         daemon=True, name=f"shared-decode-{device_id}").start()
     jpeg_pipe = os.fdopen(jpeg_r, "rb")
     stderr_tail = start_stderr_drain(proc)
     _active_streams[device_id] = proc
@@ -797,6 +862,13 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
                 # Stamp the frame as it leaves ffmpeg: events describe this moment, not
                 # the later tick that analyses it.
                 stamp = _now_ms()
+                if shared:
+                    try:  # the wall time Protect places this frame at
+                        wall = walls.popleft()
+                        stamp = (int(wall), stamp[1] - (stamp[0] - int(wall)))
+                    except IndexError:
+                        log.warning("shared decode for deviceID=%s: frame without a time",
+                                    device_id)
                 frame = np.frombuffer(buf, dtype=np.uint8).reshape((det_h, det_w, 3))
                 seq += 1
                 with _frame_cond:

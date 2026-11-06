@@ -993,3 +993,51 @@ class TestDrainSocket(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedDecodeTest(unittest.TestCase):
+    """AIPORT_ONVIF_SHARED_DECODE: detection decodes the pushed video1 with Protect's times."""
+
+    @staticmethod
+    def _video(ts, key):
+        payload = bytes([0x17 if key else 0x27, 1, 0, 0, 0]) + b"x"
+        return onvif_push._flv_tag(onvif_push._TAG_VIDEO, payload, ts)
+
+    def _split(self, tag):
+        return tag[:11], tag[11:]
+
+    def test_frames_carry_protects_wall_time(self):
+        a, b = socket.socketpair()
+        pull = mock.Mock()
+        clock = iter([1000.0, 1000.5, 1010.0])
+        with mock.patch.object(onvif_push.time, "time", lambda: next(clock)):
+            client = onvif_push.DetectClient(a, pull)
+            config = self._split(onvif_push._flv_tag(onvif_push._TAG_VIDEO,
+                                                     bytes([0x17, 0, 0, 0, 0]), 5000))
+            client.put(("start", b"FLV\x01\x05" + bytes(8), [config], 5000))
+            client.put(("tag", *self._split(self._video(5000, True))))   # sync: 1000 s at 0
+            client.put(("tag", *self._split(self._video(5100, False))))  # 100 ms on
+            client.put(("tag", *self._split(self._video(5200, True))))   # new sync at 1010 s
+            client.put(("end", "done"))
+        f = b.makefile("rb")
+        records = list(onvif_push.read_detect_records(f.read))
+        self.assertEqual([k for k, _, _ in records], [0, 0, 1, 1, 1])
+        self.assertEqual([w for k, w, _ in records if k], [1000000.0, 1000100.0, 1010000.0])
+        self.assertEqual(onvif_push._tag_timestamp(records[3][2][:11]), 100)  # retimed from base
+        pull.unsubscribe.assert_called_once_with(client)
+
+    def test_overflow_drops_the_client(self):
+        a, b = socket.socketpair()
+        with mock.patch.object(onvif_push, "DETECT_QUEUE", 1), \
+                mock.patch.object(onvif_push.threading, "Thread"):
+            client = onvif_push.DetectClient(a, mock.Mock())
+            client.put(("start", bytes(13), [(bytes(11), bytes(4))], 0))
+            self.assertTrue(client.dead)
+        a.close()
+        b.close()
+
+    def test_socket_named_from_url(self):
+        a = onvif_push.detect_socket("rtsp://u:p@cam/1")
+        self.assertEqual(a, onvif_push.detect_socket("rtsp://u:p@cam/1"))
+        self.assertNotEqual(a, onvif_push.detect_socket("rtsp://u:p@cam/2"))
+        self.assertNotIn("u:p", a)

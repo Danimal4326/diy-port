@@ -190,8 +190,9 @@ For a transcoded camera:
   the camera's rate.
 - Take it off the transcode: repeating `stalled` or `restarting`, zero frames, or sustained frames
   below the camera's rate.
-- Recalibrate `AIPORT_BOX_DELAY_MS` by checking boxes in playback, because the pipeline's delay
-  differs from `copy`.
+- Set `AIPORT_ONVIF_SHARED_DECODE=1` and `AIPORT_BOX_DELAY_MS=0`: boxes then take each
+  frame's time from the video pushed to Protect. Without it, recalibrate the box delay by
+  checking boxes in playback, because the pipeline's delay differs from `copy`.
 - Watch CPU, memory and swap as cameras add up. They share the hardware media engine with
   anything else using it, such as Frigate.
 

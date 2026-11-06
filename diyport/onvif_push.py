@@ -24,6 +24,7 @@ clock_sync.py writes 10-microsecond units for both, which Protect 7.x reads as
 video running 11% and audio 9x too fast; its media server then drops the frames
 as "from the future" and the web player never starts.
 """
+import hashlib
 import logging
 import os
 import shutil
@@ -32,6 +33,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -765,6 +767,137 @@ class SharedPull:
                     self._sinks[sink] = True  # fell behind: it rejoins at a key frame
 
 
+# AIPORT_ONVIF_SHARED_DECODE=1: detection decodes the video1 FLV this instance pushes to
+# Protect, not its own RTSP pull, and each frame carries the wall time Protect gives it.
+# Live 2026-11-05 16:18 on Driveway (isolated): boxes led the truck by ~1.9 s, because Protect
+# places video by when each frame leaves gst (rtspsrc latency=500, vtdec, vtenc, flvmux,
+# fdsink sync=true) and boxes by when a separate ffmpeg pull handed the detector its frame.
+# Instance-wide; it covers every camera this instance transcodes.
+SHARED_DECODE = os.environ.get("AIPORT_ONVIF_SHARED_DECODE", "").strip().lower() in (
+    "1", "true", "yes", "on")
+DETECT_RECORD = struct.Struct(">BdI")  # kind, wall ms, length; then that many FLV bytes
+DETECT_BYTES, DETECT_FRAME = 0, 1      # kinds: FLV bytes; a video frame (one decoded picture)
+DETECT_QUEUE = 300                     # tags a client may fall behind before it is dropped
+
+
+def detect_socket(source_url):
+    """The unix socket serving a camera's video1 to detection, named from its url so avclient
+    and the restream process find the same one without passing it."""
+    digest = hashlib.sha1(source_url.encode()).hexdigest()[:12]
+    return os.path.join(tempfile.gettempdir(), f"diyport-detect-{digest}.sock")
+
+
+class DetectClient:
+    """One detection reader of a channel: a SharedPull sink that sends each tag as a record,
+    a video frame's with the wall time Protect places it at. That is ExtendedFlvWriter's
+    g3_sync mapping (onClockSync at every key frame, 10 s fallback: wallClock + ts -
+    streamClock), worked out in put(), in the pull's thread, as the tag goes to every push."""
+
+    def __init__(self, conn, pull):
+        self.conn, self.pull = conn, pull
+        self._queue = queue.Queue(DETECT_QUEUE)
+        self._started = False
+        self._base = self._sync = None  # base ts; (sync wall ms, sync stream ms)
+        self.dead = False
+        pull.subscribe(self)
+        threading.Thread(target=self._run, daemon=True, name="detect-client").start()
+
+    def _record(self, kind, data, wall=0.0):
+        self._queue.put_nowait(DETECT_RECORD.pack(kind, wall, len(data)) + data)
+
+    def put(self, item):
+        if self.dead:
+            return True
+        try:
+            if item[0] == "start":
+                if self._started:  # it fell behind and rejoined: its decoder can't follow
+                    raise queue.Full
+                self._started = True
+                _, header, config, self._base = item
+                self._record(DETECT_BYTES, header)
+                for tag_header, body in config:
+                    self._record(DETECT_BYTES, _retime(tag_header, 0) + body)
+            elif item[0] == "tag":
+                tag_header, body = item[1], item[2]
+                ts = _tag_timestamp(tag_header) - self._base
+                data = _retime(tag_header, ts) + body
+                payload = body[:-4]
+                if tag_header[0] != _TAG_VIDEO or _is_config_tag(tag_header, payload):
+                    self._record(DETECT_BYTES, data)
+                    return True
+                now = time.time() * 1000
+                if (self._sync is None or _is_keyframe(tag_header, payload)
+                        or now - self._sync[0] >= G3_SYNC_FALLBACK_S * 1000):
+                    self._sync = (now, ts)
+                self._record(DETECT_FRAME, data, self._sync[0] + ts - self._sync[1])
+            else:  # the stream ended: send what is queued, then close
+                self.dead = True
+                self._queue.put_nowait(None)
+        except queue.Full:
+            self.dead = True
+            with self._queue.mutex:
+                self._queue.queue.clear()
+            self._queue.put_nowait(None)
+        return True
+
+    def _run(self):
+        try:
+            while not self.dead or not self._queue.empty():
+                data = self._queue.get()
+                if data is None:
+                    break
+                self.conn.sendall(data)
+        except OSError:
+            pass
+        finally:
+            self.dead = True
+            self.pull.unsubscribe(self)
+            self.conn.close()
+
+
+class DetectServer:
+    """Serves one channel of a TranscodePull to detection readers on a unix socket."""
+
+    def __init__(self, path, pull):
+        self.path, self.pull = path, pull
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.bind(path)
+        self._sock.listen(2)
+        threading.Thread(target=self._accept, daemon=True, name="detect-accept").start()
+
+    def _accept(self):
+        while True:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            DetectClient(conn, self.pull)
+
+    def close(self):
+        self._sock.close()
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+
+def read_detect_records(read):
+    """(kind, wall ms, data) records from a DetectServer until the stream ends."""
+    while True:
+        head = _read_exact(read, DETECT_RECORD.size)
+        if len(head) < DETECT_RECORD.size:
+            return
+        kind, wall, length = DETECT_RECORD.unpack(head)
+        data = _read_exact(read, length)
+        if len(data) < length:
+            return
+        yield kind, wall, data
+
+
 class TranscodePull:
     """TRANSCODE: one gst-launch decoding a camera's main stream once and encoding one
     stream per channel, each read from its own pipe into a SharedPull (never started: it
@@ -787,12 +920,22 @@ class TranscodePull:
         self._restarted = -RECONNECT_MIN_S  # monotonic: this pipeline's last start or restart
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name=f"transcode-{_describe(source_url)}")
+        self._detect = None
 
     def start(self):
+        if SHARED_DECODE and "video1" in self.outputs:
+            try:
+                self._detect = DetectServer(detect_socket(self.source_url),
+                                            self.outputs["video1"])
+            except OSError as exc:
+                log.warning("detection socket for %s failed: %r", _describe(self.source_url),
+                            exc)
         self._thread.start()
         return self
 
     def stop(self):
+        if self._detect:
+            self._detect.close()
         self._stop.set()
         for out in self.outputs.values():
             out._stop.set()

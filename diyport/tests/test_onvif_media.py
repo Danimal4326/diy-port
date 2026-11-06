@@ -36,18 +36,18 @@ PROFILES = _ENV.format('<trt:GetProfilesResponse>'
                        + _profile("Profile_2", "subStream", "H264", 640, 360, 20)
                        + '</trt:GetProfilesResponse>')
 CAPS = _ENV.format('<tds:GetCapabilitiesResponse><tds:Capabilities><tt:Media>'
-                   '<tt:XAddr>http://192.168.1.42/onvif/Media</tt:XAddr></tt:Media>'
+                   '<tt:XAddr>http://192.0.2.10/onvif/Media</tt:XAddr></tt:Media>'
                    '</tds:Capabilities></tds:GetCapabilitiesResponse>')
 
 
 def _uri(channel, token):
     return _ENV.format('<trt:GetStreamUriResponse><trt:MediaUri><tt:Uri>'
-                       f'rtsp://192.168.1.42:554/Streaming/Channels/{channel}?transportmode='
+                       f'rtsp://192.0.2.10:554/Streaming/Channels/{channel}?transportmode='
                        f'unicast&amp;profile={token}</tt:Uri></trt:MediaUri>'
                        '</trt:GetStreamUriResponse>')
 
 
-MAIN = "rtsp://admin:p%40ss@192.168.1.42/Streaming/Channels/101?profile=Profile_1"
+MAIN = "rtsp://admin:p%40ss@192.0.2.10/Streaming/Channels/101?profile=Profile_1"
 
 
 class TestParse(unittest.TestCase):
@@ -61,8 +61,8 @@ class TestParse(unittest.TestCase):
 
     def test_userinfo_carried_over(self):
         self.assertEqual(
-            onvif_media._with_userinfo("rtsp://192.168.1.42:554/Streaming/Channels/102", MAIN),
-            "rtsp://admin:p%40ss@192.168.1.42:554/Streaming/Channels/102")
+            onvif_media._with_userinfo("rtsp://192.0.2.10:554/Streaming/Channels/102", MAIN),
+            "rtsp://admin:p%40ss@192.0.2.10:554/Streaming/Channels/102")
         self.assertEqual(onvif_media._with_userinfo("rtsp://cam/102", "rtsp://cam/101"),
                          "rtsp://cam/102")
 
@@ -105,12 +105,12 @@ class TestFetch(unittest.TestCase):
 
         profiles = onvif_media.fetch_profiles(MAIN, post=post)
         self.assertEqual([p["url"] for p in profiles], [
-            "rtsp://admin:p%40ss@192.168.1.42:554/Streaming/Channels/101"
+            "rtsp://admin:p%40ss@192.0.2.10:554/Streaming/Channels/101"
             "?transportmode=unicast&profile=Profile_1",
-            "rtsp://admin:p%40ss@192.168.1.42:554/Streaming/Channels/102"
+            "rtsp://admin:p%40ss@192.0.2.10:554/Streaming/Channels/102"
             "?transportmode=unicast&profile=Profile_2"])
-        self.assertEqual([u for u, _ in calls], ["http://192.168.1.42/onvif/device_service"]
-                         + ["http://192.168.1.42/onvif/Media"] * 3)
+        self.assertEqual([u for u, _ in calls], ["http://192.0.2.10/onvif/device_service"]
+                         + ["http://192.0.2.10/onvif/Media"] * 3)
         # WS-Security digest login with the decoded user; the password never in clear.
         self.assertIn("<Username>admin</Username>", calls[0][1])
         self.assertNotIn("p@ss", calls[0][1])

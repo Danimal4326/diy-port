@@ -458,7 +458,7 @@ default; `0` turns it off). Detection decodes the video1 this instance pushes to
 camera itself, and each frame carries the wall time Protect places it at, so boxes line up
 with no `AIPORT_BOX_DELAY_MS` (set it to 0 for these cameras). Without it, boxes led the
 video by about 1.9 s in isolated mode, by an amount that moved with load. It also saves one
-camera session per camera, at about the same CPU.
+camera session per camera, at about the same CPU. Modes and costs: `docs/onvif-modes.md`.
 
 A track only joins an event once it confirms (Protect's `eventStartMSec`, 1 s), so a car that
 crosses the road in a second used to get its first box as it left. A track keeps its box from

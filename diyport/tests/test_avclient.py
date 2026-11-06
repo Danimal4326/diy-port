@@ -3534,3 +3534,31 @@ class TestProbeParse(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnrichFromFrameTest(unittest.TestCase):
+    """Face reads from the analysed frame's JPEG; between reads a face follows its person."""
+
+    def setUp(self):
+        av._enrich_cache.clear()
+        av._enrich_last_read.clear()
+
+    def test_face_follows_person_between_reads(self):
+        face = {"objectType": "face", "coord": [110, 100, 20, 20],
+                "parent_coord": [100, 100, 50, 150]}
+        moved = av._follow_parent(dict(face), [{"coord": [130, 110, 50, 150]}])
+        self.assertEqual(moved["coord"], [140, 110, 20, 20])
+        self.assertEqual(moved["parent_coord"], [130, 110, 50, 150])
+        gone = av._follow_parent(dict(face), [{"coord": [800, 800, 50, 50]}])
+        self.assertEqual(gone["coord"], [110, 100, 20, 20])
+
+    def test_reads_frame_jpeg_then_reuses_within_interval(self):
+        import cv2
+        import numpy as np
+        jpeg = cv2.imencode(".jpg", np.zeros((8, 8, 3), np.uint8))[1].tobytes()
+        dets = [{"objectType": "person", "coord": [0, 0, 10, 10], "frame": (7, jpeg)}]
+        img, key, source = av._enrich_image("CAM", dets)
+        self.assertEqual((key, source), (("frame", 7), (7, jpeg)))
+        self.assertEqual(img.shape, (8, 8, 3))
+        av._enrich_cache["CAM"] = (key, [])
+        self.assertEqual(av._enrich_image("CAM", dets)[:2], (True, ("frame", 7)))

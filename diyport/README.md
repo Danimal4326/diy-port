@@ -317,7 +317,9 @@ Knobs: `AIPORT_VEHICLE_ATTRS` / `AIPORT_LPR` / `AIPORT_FACE` (`auto`|`0`|`1`),
 `AIPORT_FACE_MATCH_MIN_PX` (40, the face's shorter side: smaller faces are too small to match
 and get no `faceEmbed`; a face track is still tracked from its small reads but is reported only
 once a read reaches the minimum, with its thumbnail and embedding from those reads. A face that
-stays small is never reported; its person still is), `AIPORT_FACE_EMBED_MIN_PX` (60: a
+stays small is never reported; its person still is), `AIPORT_ENRICH_INTERVAL_S` (0.25: plate
+and face reads use the analysed frame's own full-res JPEG at most this often, and between reads
+a face box moves with its person), `AIPORT_FACE_EMBED_MIN_PX` (60: a
 smaller read is still matched against Protect's face DB here, but its `faceEmbed` isn't sent;
 unnamed, Protect would run its own looser search on it, which put 43-48 px reads on the wrong
 person), `AIPORT_FACE_EMBED_MIN_NORM` (7.0: a read whose SFace vector is shorter than this,

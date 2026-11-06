@@ -1648,6 +1648,57 @@ def _plate_settled(device_id, coord):
     return False
 
 
+# Plate/face reads come from the analysed frame's own JPEG (the one its person and vehicle
+# boxes came from), at most every AIPORT_ENRICH_INTERVAL_S; between reads a face box moves
+# with its person. Live 2026-11-06 on the onvif instance: face boxes were sluggish next to
+# exact person boxes, because reads came from the 1 s snapshot file and each result was
+# re-sent with every newer frame's time until the next snapshot.
+ENRICH_INTERVAL_S = float(os.environ.get("AIPORT_ENRICH_INTERVAL_S") or 0.25)
+_enrich_last_read = {}  # deviceID -> monotonic s of the last fresh plate/face read
+
+
+def _enrich_image(device_id, detections):
+    """(BGR image, key, (key, JPEG)) for this tick's plate/face reads. The key matching
+    _enrich_cache's means reuse it (the image is then just True)."""
+    cached = _enrich_cache.get(device_id)
+    now = time.monotonic()
+    last = _enrich_last_read.get(device_id)
+    if cached and last is not None and now - last < ENRICH_INTERVAL_S:
+        return True, cached[0], None
+    frame = next((d["frame"] for d in detections if d.get("frame")), None)
+    if frame is not None:
+        import cv2
+        import numpy as np
+        img = cv2.imdecode(np.frombuffer(frame[1], np.uint8), cv2.IMREAD_COLOR)
+        if img is not None:
+            _enrich_last_read[device_id] = now
+            return img, ("frame", frame[0]), frame
+    if cached and isinstance(cached[0], tuple) and last is not None and now - last < 1.0:
+        return True, cached[0], None  # a frame's read beats an older snapshot
+    img, mtime = _load_snapshot_bgr(device_id)
+    if img is not None and not (cached and cached[0] == mtime):
+        _enrich_last_read[device_id] = now
+    return img, mtime, _snapshot_bytes.get(device_id)
+
+
+def _follow_parent(face, people):
+    """A reused face read, moved by as much as its person has moved since the read."""
+    parent = face.get("parent_coord")
+    if not parent or not people:
+        return face
+    best = max(people, key=lambda p: _iou(p["coord"], parent))
+    if _iou(best["coord"], parent) <= 0:
+        return face
+    cur = best["coord"]
+    dx = cur[0] + cur[2] / 2 - parent[0] - parent[2] / 2
+    dy = cur[1] + cur[3] / 2 - parent[1] - parent[3] / 2
+    x, y, w, h = face["coord"]
+    end = CAMERA_COORD_END
+    face["coord"] = [min(max(0, x + dx), end - w), min(max(0, y + dy), end - h), w, h]
+    face["parent_coord"] = list(cur)
+    return face
+
+
 def _enrich_detections(device_id, detections):
     """Face detections (plus plate text on vehicles) from this tick's boxes.
     Protect reads a vehicle's plate from its descriptor `name` and recognises a
@@ -1661,7 +1712,7 @@ def _enrich_detections(device_id, detections):
     enricher = _get_enricher()
     if not (enricher.lpr and vehicles) and not (enricher.face and people):
         return []
-    img, mtime = _load_snapshot_bgr(device_id)
+    img, mtime, source = _enrich_image(device_id, detections)
     if img is None:
         return []
     cached = _enrich_cache.get(device_id)
@@ -1678,7 +1729,7 @@ def _enrich_detections(device_id, detections):
             for f in enricher.faces(img, [p["coord"] for p in people]):
                 face = {"objectType": "face", "score": f["score"], "coord": f["coord"],
                         "extra": {"name": f["name"], "tag": f["name"]},
-                        "frame": _snapshot_bytes.get(device_id), "size_px": f.get("size_px"),
+                        "frame": source, "size_px": f.get("size_px"),
                         "fresh_read": True, "parent_coord": list(people[f["parent"]]["coord"])}
                 # Under FACE_MATCH_MIN_PX: tracked, but no embedding, no match, not reported.
                 small = f.get("size_px", enrich.FACE_MATCH_MIN_PX) < enrich.FACE_MATCH_MIN_PX
@@ -1711,10 +1762,13 @@ def _enrich_detections(device_id, detections):
                      e["objectType"], device_id, e["score"], e["extra"]["name"],
                      "faceEmbed" in e.get("scored", {}), e.get("size_px"))
     # A face DB match counts once per snapshot read, not on every tick that reuses it.
-    return [dict(e, extra=dict(e["extra"]), fresh_read=fresh and e.get("fresh_read", False),
-                 **({"scored": {k: v for k, v in e["scored"].items() if fresh or k != "match"}}
-                    if "scored" in e else {}))
-            for e in extra]
+    out = [dict(e, extra=dict(e["extra"]), fresh_read=fresh and e.get("fresh_read", False),
+                **({"scored": {k: v for k, v in e["scored"].items() if fresh or k != "match"}}
+                   if "scored" in e else {}))
+           for e in extra]
+    if not fresh:
+        out = [_follow_parent(e, people) if e["objectType"] == "face" else e for e in out]
+    return out
 
 
 def _size_jump(a, b):

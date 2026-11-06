@@ -772,9 +772,10 @@ class SharedPull:
 # Live 2026-11-05 16:18 on Driveway (isolated): boxes led the truck by ~1.9 s, because Protect
 # places video by when each frame leaves gst (rtspsrc latency=500, vtdec, vtenc, flvmux,
 # fdsink sync=true) and boxes by when a separate ffmpeg pull handed the detector its frame.
-# Instance-wide; it covers every camera this instance transcodes.
-SHARED_DECODE = os.environ.get("AIPORT_ONVIF_SHARED_DECODE", "").strip().lower() in (
-    "1", "true", "yes", "on")
+# Instance-wide; it covers every camera this instance transcodes. On by default since
+# 2026-11-06 (exact boxes at delay 0 on all four onvif cameras); 0 goes back to the camera pull.
+SHARED_DECODE = (os.environ.get("AIPORT_ONVIF_SHARED_DECODE") or "1").strip().lower() not in (
+    "0", "false", "no", "off")
 DETECT_RECORD = struct.Struct(">BdI")  # kind, wall ms, length; then that many FLV bytes
 DETECT_BYTES, DETECT_FRAME = 0, 1      # kinds: FLV bytes; a video frame (one decoded picture)
 DETECT_QUEUE = 300                     # tags a client may fall behind before it is dropped

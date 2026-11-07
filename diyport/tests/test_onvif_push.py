@@ -1026,6 +1026,43 @@ class SharedDecodeTest(unittest.TestCase):
         self.assertEqual(onvif_push._tag_timestamp(records[3][2][:11]), 100)  # retimed from base
         pull.unsubscribe.assert_called_once_with(client)
 
+    def test_frames_take_the_wall_time_the_push_sent(self):
+        # The push sends a frame 2 s after detection saw it: the frame still gets Protect's time.
+        a, b = socket.socketpair()
+        pull = mock.Mock(protect_clock=onvif_push.ProtectClock())
+        client = onvif_push.DetectClient(a, pull)
+        config = self._split(onvif_push._flv_tag(onvif_push._TAG_VIDEO,
+                                                 bytes([0x17, 0, 0, 0, 0]), 5000))
+        client.put(("start", b"FLV\x01\x05" + bytes(8), [config], 5000))
+        client.put(("tag", *self._split(self._video(5000, True))))
+        client.put(("tag", *self._split(self._video(5100, False))))
+        client.put(("tag", *self._split(self._video(5200, True))))
+        client.put(("end", "done"))
+        clock = pull.protect_clock
+        times = iter([2000.0] * 3 + [2010.0])
+        writer = onvif_push.ExtendedFlvWriter(lambda d: None, clock=times.__next__, g3_sync=True)
+        writer.on_sync = lambda ts, wall: clock.synced(ts + 5000, wall)
+        writer.header(b"FLV\x01\x05" + bytes(8))
+        writer.initial_sync()                          # streamClock 0 = pull 5000 at 2000 s
+        clock.wrote(5100)
+        writer.sync_if_due(200, keyframe=True)         # pull 5200 at 2010 s
+        clock.wrote(5200)
+        f = b.makefile("rb")
+        records = list(onvif_push.read_detect_records(f.read))
+        self.assertEqual([w for k, w, _ in records if k], [2000000.0, 2000100.0, 2010000.0])
+
+    def test_no_push_falls_back_to_our_clock(self):
+        a, b = socket.socketpair()
+        pull = mock.Mock(protect_clock=onvif_push.ProtectClock())
+        with mock.patch.object(onvif_push, "PROTECT_CLOCK_WAIT_S", 0.05):
+            client = onvif_push.DetectClient(a, pull)
+            client.put(("start", b"FLV\x01\x05" + bytes(8), [], 0))
+            with mock.patch.object(onvif_push.time, "time", lambda: 1000.0):
+                client.put(("tag", *self._split(self._video(0, True))))
+            client.put(("end", "done"))
+            records = list(onvif_push.read_detect_records(b.makefile("rb").read))
+        self.assertEqual([w for k, w, _ in records if k], [1000000.0])
+
     def test_overflow_drops_the_client(self):
         a, b = socket.socketpair()
         with mock.patch.object(onvif_push, "DETECT_QUEUE", 1), \

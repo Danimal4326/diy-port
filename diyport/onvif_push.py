@@ -24,6 +24,7 @@ clock_sync.py writes 10-microsecond units for both, which Protect 7.x reads as
 video running 11% and audio 9x too fast; its media server then drops the frames
 as "from the future" and the web player never starts.
 """
+import collections
 import hashlib
 import logging
 import os
@@ -305,6 +306,11 @@ class ExtendedFlvWriter:
         # - dropping"), which lost the first ~5 s after every reconnect (live 2026-10-28).
         self.early_sync = early_sync
         self._sync_next = False
+        self.on_sync = None  # (streamClock ms, wallClock ms) of each onClockSync sent
+
+    def _synced(self, stream_ms, wall_ms):
+        if self.on_sync:
+            self.on_sync(stream_ms, wall_ms)
 
     def header(self, header):
         self.write(header[:4] + b"\x07" + header[5:9])
@@ -322,6 +328,7 @@ class ExtendedFlvWriter:
         self.write(script_tag("onClockSync", {"streamClock": 0, "streamClockBase": 0,
                                               "wallClock": now * 1000}, 0))
         self.write(timing_trailer(False, now - self.start))
+        self._synced(0, now * 1000)
 
     def sync_if_due(self, timestamp, keyframe=False):
         """Once per tag, before it: the clock sync when it is due."""
@@ -335,6 +342,7 @@ class ExtendedFlvWriter:
                                                   "streamClockBase": 0,
                                                   "wallClock": now * 1000}, timestamp))
             self.write(timing_trailer(False, now - self.start))
+            self._synced(int(timestamp), now * 1000)
             self.write(script_tag("onMpma", _MPMA, 0))
             self.write(timing_trailer(False, now - self.start))
 
@@ -619,6 +627,7 @@ class SharedPull:
         self._codec_error_logged = None
         self._copy_audio = True  # until ffmpeg says FLV can't hold the camera's audio
         self._last_video = None  # monotonic s of the last video frame of this pull
+        self.protect_clock = None  # TRANSCODE video1 with shared decode: a ProtectClock
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name=f"pull-{_describe(source_url)}")
 
@@ -718,6 +727,8 @@ class SharedPull:
         stats = _DeliveryStats(label or _describe(self.source_url))
         self._header = read_flv_header(read)
         self._config = {}
+        if self.protect_clock:
+            self.protect_clock.reset()  # a new stream: its timestamps start again
         for tag_header, body in read_tags(read):
             if self._stop.is_set():
                 break
@@ -788,18 +799,71 @@ def detect_socket(source_url):
     return os.path.join(tempfile.gettempdir(), f"diyport-detect-{digest}.sock")
 
 
+# How long detection waits for the video1 push to send a frame before it falls back to its own
+# clock reading (no push connected, or reconnecting).
+PROTECT_CLOCK_WAIT_S = 3.0
+
+
+class ProtectClock:
+    """The onClockSyncs the video1 push actually sent Protect, in the pull's stream time, and
+    the last video frame it wrote. Live 2026-11-07 on Driveway (shared decode, delay 0): boxes
+    a little ahead of the vehicle. DetectClient read the clock itself when a tag left the pull,
+    while the push reads it when the tag leaves its queue (QUEUE_TAGS, up to ~10 s), so any
+    push backlog put Protect's wall time later than ours and the box early by that much. Now a
+    frame's wall time is Protect's own: its sync's wallClock + (ts - streamClock)."""
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self.reset()
+
+    def reset(self):
+        with self._cond:
+            self._syncs = collections.deque(maxlen=16)  # (stream ms, wall ms), oldest first
+            self._written = None  # stream ms of the last video frame sent to Protect
+
+    def synced(self, stream_ms, wall_ms):
+        with self._cond:
+            self._syncs.append((stream_ms, wall_ms))
+
+    def wrote(self, stream_ms):
+        with self._cond:
+            self._written = stream_ms
+            self._cond.notify_all()
+
+    def wall(self, stream_ms, timeout):
+        """Protect's wall ms for the frame at stream_ms, once the push has sent it, by the
+        sync in force when it went (the latest at or before it); None after `timeout` s."""
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while self._written is None or self._written < stream_ms:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                self._cond.wait(left)
+            sync = next((s for s in reversed(self._syncs) if s[0] <= stream_ms), None)
+            return None if sync is None else sync[1] + stream_ms - sync[0]
+
+
 class DetectClient:
     """One detection reader of a channel: a SharedPull sink that sends each tag as a record,
-    a video frame's with the wall time Protect places it at. That is ExtendedFlvWriter's
-    g3_sync mapping (onClockSync at every key frame, 10 s fallback: wallClock + ts -
-    streamClock), worked out in put(), in the pull's thread, as the tag goes to every push."""
+    a video frame's with the wall time Protect places it at. With the channel's ProtectClock
+    (TRANSCODE video1) that is the push's own onClockSync mapping, read once the push has sent
+    the frame; without it, or when no push sends it within PROTECT_CLOCK_WAIT_S, the same
+    g3_sync mapping (sync at every key frame, 10 s fallback) on a clock read here."""
+
+    LAG_LOG_S = 60.0
 
     def __init__(self, conn, pull):
         self.conn, self.pull = conn, pull
+        clock = getattr(pull, "protect_clock", None)
+        self.clock = clock if isinstance(clock, ProtectClock) else None
         self._queue = queue.Queue(DETECT_QUEUE)
         self._started = False
         self._base = self._sync = None  # base ts; (sync wall ms, sync stream ms)
         self.dead = False
+        self._lags = []        # Protect's wall - ours, ms, since the last lag line
+        self._fallbacks = 0
+        self._lag_logged = time.monotonic()
         pull.subscribe(self)
         threading.Thread(target=self._run, daemon=True, name="detect-client").start()
 
@@ -820,7 +884,8 @@ class DetectClient:
                     self._record(DETECT_BYTES, _retime(tag_header, 0) + body)
             elif item[0] == "tag":
                 tag_header, body = item[1], item[2]
-                ts = _tag_timestamp(tag_header) - self._base
+                stream_ms = _tag_timestamp(tag_header)
+                ts = stream_ms - self._base
                 data = _retime(tag_header, ts) + body
                 payload = body[:-4]
                 if tag_header[0] != _TAG_VIDEO or _is_config_tag(tag_header, payload):
@@ -830,7 +895,11 @@ class DetectClient:
                 if (self._sync is None or _is_keyframe(tag_header, payload)
                         or now - self._sync[0] >= G3_SYNC_FALLBACK_S * 1000):
                     self._sync = (now, ts)
-                self._record(DETECT_FRAME, data, self._sync[0] + ts - self._sync[1])
+                own = self._sync[0] + ts - self._sync[1]
+                if self.clock:  # resolved in _run, once the push has sent it
+                    self._queue.put_nowait((stream_ms, own, data))
+                else:
+                    self._record(DETECT_FRAME, data, own)
             else:  # the stream ended: send what is queued, then close
                 self.dead = True
                 self._queue.put_nowait(None)
@@ -841,12 +910,38 @@ class DetectClient:
             self._queue.put_nowait(None)
         return True
 
+    def _protect_wall(self, stream_ms, own):
+        wall = self.clock.wall(stream_ms, PROTECT_CLOCK_WAIT_S)
+        if wall is None:
+            self._fallbacks += 1
+            wall = own
+        else:
+            self._lags.append(wall - own)
+        now = time.monotonic()
+        if now - self._lag_logged >= self.LAG_LOG_S:
+            self._lag_logged = now
+            lags, self._lags = self._lags, []
+            if lags:
+                log.info("detect %s: video1 push lag avg %.0f ms, max %.0f ms over %d frames%s",
+                         _describe(self.pull.source_url), sum(lags) / len(lags), max(lags),
+                         len(lags), f", {self._fallbacks} on our own clock (no push)"
+                         if self._fallbacks else "")
+            elif self._fallbacks:
+                log.warning("detect %s: %d frames on our own clock, no video1 push sent them",
+                            _describe(self.pull.source_url), self._fallbacks)
+            self._fallbacks = 0
+        return wall
+
     def _run(self):
         try:
             while not self.dead or not self._queue.empty():
                 data = self._queue.get()
                 if data is None:
                     break
+                if isinstance(data, tuple):
+                    stream_ms, own, flv = data
+                    data = DETECT_RECORD.pack(DETECT_FRAME, self._protect_wall(stream_ms, own),
+                                              len(flv)) + flv
                 self.conn.sendall(data)
         except OSError:
             pass
@@ -926,6 +1021,7 @@ class TranscodePull:
     def start(self):
         if SHARED_DECODE and "video1" in self.outputs:
             try:
+                self.outputs["video1"].protect_clock = ProtectClock()
                 self._detect = DetectServer(detect_socket(self.source_url),
                                             self.outputs["video1"])
             except OSError as exc:
@@ -1216,6 +1312,10 @@ class FlvPush:
                 sent += len(data)
 
             writer = self._new_writer(write)
+            clock = getattr(self._pull, "protect_clock", None)  # shared decode, video1
+            clock = clock if isinstance(clock, ProtectClock) else None
+            if clock:
+                writer.on_sync = lambda ts, wall: clock.synced(ts + base_ts, wall)
             writer.header(header)
             for tag_header, body in config:
                 tag_header, body = set_stream_name(tag_header, body, self.stream_name)
@@ -1238,6 +1338,8 @@ class FlvPush:
                 writer.tag(tag_header, item[2])
                 if tag_header[0] == _TAG_VIDEO:
                     self.last_sent = time.monotonic()
+                    if clock:
+                        clock.wrote(_tag_timestamp(item[1]))
         except OSError as exc:
             reason = repr(exc)
         finally:

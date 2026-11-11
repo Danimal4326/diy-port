@@ -560,7 +560,9 @@ class TestOpenVinoRuntime(unittest.TestCase):
     def test_preprocess_uint8_nhwc_to_scaled_nchw(self):
         frame = np.random.default_rng(0).integers(0, 256, (1, 4, 4, 3), dtype=np.uint8)
         want = frame.transpose(0, 3, 1, 2).astype(np.float32) / 255.0
-        for et, tol in ((np.float32, 1e-6), (np.float16, 1e-3)):  # Ultralytics ONNX is fp16
+        # The CPU plugin may compute in fp16 even for an f32 model (seen on ARM);
+        # the /255 scaling error would be ~255x larger than these tolerances.
+        for et, tol in ((np.float32, 1e-3), (np.float16, 1e-3)):
             out, side = self._run_prepared(self._identity([1, 3, 4, 4], et), frame)
             self.assertEqual((out.dtype, side), (np.float32, 4), et)
             np.testing.assert_allclose(out, want, atol=tol)

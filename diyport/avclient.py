@@ -4654,6 +4654,11 @@ def _version_from_update_uri(uri):
     return dict(parse_qsl(parts.query)).get("version") or None
 
 
+# What GetInfo reports as both the detected and the required PoE type: a real AI Port runs on
+# PoE+ (802.3at); this host has no PoE at all, and anything equal keeps Protect quiet.
+AIPORT_POE_TYPE = "802.3at"
+
+
 def handle_function(ws, msg, device_info):
     fn = msg.get("functionName")
     payload = msg.get("payload") or {}
@@ -4908,6 +4913,18 @@ def handle_function(ws, msg, device_info):
             send_msg(ws, fn, {"name": config.device_name(STATE_DIR, device_info.get("name")),
                               "timezone": payload.get("timezone") or ""},
                      in_response_to=msg_id)
+        return
+
+    if fn == "GetInfo":
+        # Protect's AI Port info sync (aiport getInfo) parses this against a schema that
+        # requires power {detectedPoeType, expectedPoeType} and saves them as the port's
+        # powerSupply. Before this an empty ack made every sync fail ("Failed to parse
+        # 'aiPortInfo' ... must have required property 'power'", live 2026-11-11). Protect
+        # raises a possible-insufficient-PoE event when detected ranks below expected, so
+        # both are the same; `status` is optional and left out.
+        send_msg(ws, fn, {"power": {"detectedPoeType": AIPORT_POE_TYPE,
+                                    "expectedPoeType": AIPORT_POE_TYPE}},
+                 in_response_to=msg_id)
         return
 
     # Unknown function: ack if a response is expected.

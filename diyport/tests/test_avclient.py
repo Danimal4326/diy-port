@@ -2377,6 +2377,18 @@ class TestConfigHandler(Base):
         self.assertEqual(self.sent[-1][0], "ChangeSmartDetectSettings")
 
 
+class TestGetInfo(Base):
+    def test_reports_power_protect_can_parse(self):
+        # Protect's aiPortInfo schema requires power.detectedPoeType and expectedPoeType
+        # (802.3af/at/bt); equal values keep it from raising an insufficient-PoE event.
+        av.handle_function(None, {"functionName": "GetInfo", "messageId": 7,
+                                  "responseExpected": True, "payload": {}}, {})
+        fn, body = self.sent[-1][0], self.sent[-1][1]
+        self.assertEqual(fn, "GetInfo")
+        self.assertEqual(body["power"], {"detectedPoeType": "802.3at",
+                                         "expectedPoeType": "802.3at"})
+
+
 class TestEventDedupe(Base):
     def setUp(self):
         super().setUp()

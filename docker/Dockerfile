@@ -31,7 +31,8 @@ ARG GMMLIB_VER=22.10.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# hadolint ignore=DL3008
+# DL3003 is the temp dir used to install the pinned Intel debs.
+# hadolint ignore=DL3008,DL3003
 RUN case "$ACCEL" in cpu|edgetpu|openvino|none) ;; *) echo "ACCEL must be cpu|edgetpu|openvino|none" >&2; exit 1 ;; esac \
  && apt-get update \
  && apt-get install -y --no-install-recommends \

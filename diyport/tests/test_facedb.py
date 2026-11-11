@@ -106,6 +106,22 @@ class TestParse(unittest.TestCase):
                                 items=[item(garbage=True), item(vec())]))
         self.assertEqual([i for i, *_ in db.instances], [1])
 
+    def test_unusable_instances_summarised_in_one_line_each(self):
+        # Protect's own cameras enrol one unit-length 512-float vector per instance: another face
+        # model. Live 2026-11-10 that was 1 717 instances, one warning each; now one line.
+        def foreign():
+            v = RNG.normal(size=facedb.ITEM_DIM)
+            v = np.round(v / np.linalg.norm(v), 4)
+            return np.array([1, 0, 0, 0], "<i4").tobytes() + np.asarray(v, "<f4").tobytes()
+        data = build({5: ("Ian", [vec()]), 6: ("Pat", [vec(), vec(), vec()]), 7: ("Lee", [vec()])},
+                     items=[item(vec()), foreign(), foreign(), foreign(), item(garbage=True)])
+        with self.assertLogs("aiport-facedb", "WARNING") as logs:
+            db = facedb.parse(data)
+        self.assertEqual([i for i, *_ in db.instances], [0])     # matching is unchanged
+        self.assertEqual(len(logs.records), 2)
+        self.assertIn("3 instance(s) of 1 subject(s) hold a 512-float", logs.output[0])
+        self.assertIn("1 instance(s) have no usable embedding (e.g. 4)", logs.output[1])
+
     def test_ignored_subject_left_out(self):
         db = facedb.parse(build({5: ("Ian", [vec()]), 6: ("Pat", [vec()])}, ignored_subjects=[6]))
         self.assertEqual(set(db.subjects), {5})

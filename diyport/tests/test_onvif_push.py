@@ -244,15 +244,6 @@ class TestPushManager(unittest.TestCase):
                          [("video1", "rtsp://cam/101", "S1"),
                           ("video1", "rtsp://cam/101", "S1")])
 
-    def test_clear_device_stops_all(self):
-        self.m.set_source("CAM", "rtsp://cam/101")
-        self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video3", "S3")})
-        self.m.clear_device("CAM")
-        for push in self.started:
-            push.stop.assert_called_once()
-        self.assertFalse(self.m.has_source("CAM"))
-        self.assertIsNone(self.m.source("CAM"))
-
     def test_source_geometry_and_audio(self):
         self.m.set_source("CAM", "rtsp://cam/101", audio=False, width=3840, height=2160, fps=12)
         self.assertEqual(self.m.source("CAM"), {"url": "rtsp://cam/101", "audio": False,

@@ -191,6 +191,15 @@ class TestParsers(Base):
         self.assertEqual(av._parse_zones(None), [])
         self.assertEqual(av._parse_zone_map(field), {"1": [(0, 0), (10, 0), (10, 10), (0, 10)]})
 
+    def test_zone_lists_stay_aligned_past_a_bad_entry(self):
+        # A non-dict entry used to be skipped only by the map, so ids/types could
+        # crash or fall out of step with the polygons.
+        field = {"1": "junk", "2": {"coord": [0, 0, 10, 0, 10, 10], "objectTypes": ["person"]},
+                 "3": {"coord": [1, 1, 5, 1, 5, 5]}}
+        self.assertEqual(av._parse_zone_ids(field), [2, 3])
+        self.assertEqual(av._parse_zone_types(field), [["person"], None])
+        self.assertEqual(len(av._parse_zones(field)), 2)
+
     def test_zone_id_follows_controller_key(self):
         field = {"7": {"coord": [0, 0, 1000, 0, 1000, 1000, 0, 1000]}}
         self.assertEqual(av._parse_zone_ids(field), [7])
@@ -3530,6 +3539,46 @@ class TestProbeParse(unittest.TestCase):
                          {"codec": "h264", "width": None, "height": None, "fps": None})
         self.assertEqual(av._parse_probe(""),
                          {"codec": None, "width": None, "height": None, "fps": None})
+
+
+class TestSharedDecodeKeep(unittest.TestCase):
+    """Live 2026-11-07 on 92DE633106E8 (15 fps): a whole stride, round(15/10) = 2, gave
+    7.5 fps and "falling behind" every minute; keep 10 of every 15, evenly spread."""
+
+    def kept(self, fps, n=60):
+        keep = av._shared_decode_keep(fps)
+        return [i for i in range(n) if av._shared_decode_keeps(i, keep)]
+
+    def test_15fps_keeps_the_detection_rate(self):
+        self.assertEqual(av._shared_decode_keep(15), (av.DETECT_FPS, 15))
+        kept = self.kept(15, 30)
+        self.assertEqual(len(kept), 2 * av.DETECT_FPS)
+        gaps = {b - a for a, b in zip(kept, kept[1:])}
+        self.assertLessEqual(gaps, {1, 2})               # evenly spread, no bursts
+
+    def test_whole_multiples_are_a_plain_stride(self):
+        self.assertEqual(len(self.kept(20)), 30)
+        self.assertEqual({b - a for a, b in zip(self.kept(20), self.kept(20)[1:])}, {2})
+        self.assertEqual(len(self.kept(30)), 20)
+
+    def test_slow_or_odd_sources_keep_every_frame(self):
+        self.assertEqual(self.kept(8, 16), list(range(16)))
+        self.assertEqual(av._shared_decode_keep(14.985), (av.DETECT_FPS, 15))
+        self.assertEqual(av._shared_decode_keep(0.2), (1, 1))
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_ffmpeg_select_matches_the_wall_time_feeder(self):
+        # Each kept output frame takes the wall time of the input frame the feeder queued
+        # for it, so ffmpeg's select must pick exactly the same input frames.
+        keep = av._shared_decode_keep(15)
+        out = subprocess.run(
+            ["ffmpeg", "-v", "info", "-f", "lavfi", "-i", "testsrc=size=32x32:rate=15:duration=3",
+             "-vf", av._shared_decode_select(keep) + ",showinfo",
+             "-f", "null", "-"], capture_output=True, text=True, check=True).stderr
+        pts = [int(line.split("pts:")[1].split()[0]) for line in out.splitlines()
+               if "pts:" in line and "showinfo" in line]
+        expect = [i for i in range(45) if av._shared_decode_keeps(i, keep)]
+        self.assertEqual(pts, expect)
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@ import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
+import envutil
 import onvif_media
 from procutil import start_stderr_drain
 
@@ -162,7 +163,7 @@ TRANSCODE_VIDEO3_HEIGHT = 360
 # (0: never). Live 2026-11-03 17:24 on Driveway: gst-launch stayed alive with its RTSP socket
 # CLOSED and no output for 2.5 h. Only Protect's re-sends could end that, and a hang with
 # none went uncaught. Detection has its own pull and is left alone.
-TRANSCODE_STALL_S = float(os.environ.get("AIPORT_ONVIF_STALL_S") or 30)
+TRANSCODE_STALL_S = envutil.env_float("AIPORT_ONVIF_STALL_S", 30)
 # A settings re-send only replaces the pipeline when a channel has been silent this long.
 # Otherwise it reconnects just that push: a restart costs all three channels and a camera
 # session, and encoders that are still producing can't be why Protect lost one stream.
@@ -785,8 +786,7 @@ class SharedPull:
 # fdsink sync=true) and boxes by when a separate ffmpeg pull handed the detector its frame.
 # Instance-wide; it covers every camera this instance transcodes. On by default since
 # 2026-11-06 (exact boxes at delay 0 on all four onvif cameras); 0 goes back to the camera pull.
-SHARED_DECODE = (os.environ.get("AIPORT_ONVIF_SHARED_DECODE") or "1").strip().lower() not in (
-    "0", "false", "no", "off")
+SHARED_DECODE = envutil.env_bool("AIPORT_ONVIF_SHARED_DECODE", True)
 DETECT_RECORD = struct.Struct(">BdI")  # kind, wall ms, length; then that many FLV bytes
 DETECT_BYTES, DETECT_FRAME = 0, 1      # kinds: FLV bytes; a video frame (one decoded picture)
 DETECT_QUEUE = 300                     # tags a client may fall behind before it is dropped
@@ -1557,14 +1557,6 @@ class PushManager:
     def _forget_last_sent(self, device_id):
         for key in [k for k in self._last_sent if k[0] == device_id]:
             del self._last_sent[key]
-
-    def clear_device(self, device_id):
-        """Forget the device entirely: stop pushes and drop its destinations."""
-        with self._lock:
-            self._sources.pop(device_id, None)
-            self._wanted.pop(device_id, None)
-            self._sync(device_id)
-            self._forget_last_sent(device_id)
 
     def has_source(self, device_id):
         with self._lock:

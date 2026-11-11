@@ -44,11 +44,13 @@ log = logging.getLogger("aiport-avclient")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
+import envutil
 import apple_fm
 import enrich
 import hoststats
 import onvif_push
 import onvif_restream
+import regions
 from procutil import start_stderr_drain
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -157,7 +159,7 @@ def _probe_stream(url, timeout=8):
 
 # An RTSP pull ffmpeg gives up on after this long with no data, so a dead relay connection
 # exits and is restarted (live 17:28 a pull sat 70 min on one, at 0% CPU, with no frames).
-RTSP_TIMEOUT_S = float(os.environ.get("AIPORT_RTSP_TIMEOUT_S") or 15)
+RTSP_TIMEOUT_S = envutil.env_float("AIPORT_RTSP_TIMEOUT_S", 15)
 _rtsp_timeout_flag = []   # cached: [flag or None]
 
 
@@ -204,15 +206,15 @@ _motion_poll_stop = {}  # deviceID -> threading.Event, signals the poll loop to 
 _motion_poll_thread = {}  # deviceID -> threading.Thread, joined on stop
 _event_id_counter = itertools.count(int(time.time()))  # monotonic, avoids same-second collisions across tracks
 # Classification tick (AIPORT_TICK_S): 0.33 s on macOS (Core ML ~8 ms), 1.5 s elsewhere.
-MOTION_POLL_INTERVAL_S = float(os.environ.get("AIPORT_TICK_S")
-                               or (0.33 if sys.platform == "darwin" else 1.5))
+MOTION_POLL_INTERVAL_S = envutil.env_float("AIPORT_TICK_S",
+                                           0.33 if sys.platform == "darwin" else 1.5)
 # How often `moving` updates go to Protect: once per AIPORT_TICK_S.
 REPORT_INTERVAL_MS = int(MOTION_POLL_INTERVAL_S * 1000)
 # Analysed frames per camera per second (AIPORT_DETECT_FPS): 10 on macOS, else one per tick.
 DETECT_INTERVAL_S = min(MOTION_POLL_INTERVAL_S,
-                        1 / float(os.environ.get("AIPORT_DETECT_FPS")
-                                  or (10 if sys.platform == "darwin"
-                                      else 1 / MOTION_POLL_INTERVAL_S)))
+                        1 / envutil.env_float("AIPORT_DETECT_FPS",
+                                              10 if sys.platform == "darwin"
+                                              else 1 / MOTION_POLL_INTERVAL_S))
 DETECT_FPS = max(2, math.ceil(1 / DETECT_INTERVAL_S))
 # The loop analyses every frame, so timers use 1/DETECT_FPS; DETECT_INTERVAL_S is only the
 # idle timeout and differs from it when DETECT_FPS is floored to 2.
@@ -230,7 +232,7 @@ def _ticks(seconds):
 BOX_DISPLAY_MS = int(MOTION_POLL_INTERVAL_S * 1000) + 100
 # Seconds without a detection before a track closes (AIPORT_MISS_S, default 3); parked
 # tracks keep 30 s so flicker doesn't recreate them as arrivals.
-MOTION_MISS_TOLERANCE_S = float(os.environ.get("AIPORT_MISS_S") or 3)
+MOTION_MISS_TOLERANCE_S = envutil.env_float("AIPORT_MISS_S", 3)
 MOTION_MISS_TOLERANCE_TICKS = _ticks(MOTION_MISS_TOLERANCE_S)
 PARKED_MISS_TOLERANCE_TICKS = _ticks(30)
 # Reported boxes are smoothed (exponential, this weight on the newest detection) so per-frame
@@ -279,21 +281,7 @@ _MIN_INIT_SPEC = os.environ.get("AIPORT_MIN_INITIALIZED")
 
 def _parse_min_initialized(spec):
     """(default frames, {deviceID: frames}) from AIPORT_MIN_INITIALIZED."""
-    per = {}
-    default = _MIN_INIT_DEFAULT
-    for part in (spec or "").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            if "=" in part:
-                dev, n = part.split("=", 1)
-                per[dev.strip().upper()] = int(n)
-            else:
-                default = int(part)
-        except ValueError:
-            log.warning("ignoring bad AIPORT_MIN_INITIALIZED entry %r", part)
-    return default, per
+    return envutil.parse_keyed(spec, "AIPORT_MIN_INITIALIZED", _MIN_INIT_DEFAULT)
 
 
 MIN_INITIALIZED, _MIN_INITIALIZED_PER = _parse_min_initialized(_MIN_INIT_SPEC)
@@ -305,20 +293,7 @@ def _min_initialized(device_id):
 
 def _parse_true_thresh(spec):
     """AIPORT_TRUE_THRESH: "<default>[,<objectType>=<value>...]" -> (default, {type: value})."""
-    default, per = DEFAULT_TRUE_THRESH, {}
-    for part in (spec or "").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            if "=" in part:
-                name, value = part.split("=", 1)
-                per[name.strip()] = float(value)
-            else:
-                default = float(part)
-        except ValueError:
-            log.warning("ignoring bad AIPORT_TRUE_THRESH entry %r", part)
-    return default, per
+    return envutil.parse_keyed(spec, "AIPORT_TRUE_THRESH", DEFAULT_TRUE_THRESH, float, str)
 
 
 _TRUE_THRESH_DEFAULT, _TRUE_THRESH = _parse_true_thresh(os.environ.get("AIPORT_TRUE_THRESH"))
@@ -346,7 +321,7 @@ def _record_score(tr, score, device_id=None):
 
 # A same-type box where a track closed within RESUME_S resumes it (IoU >= RESUME_IOU with
 # its last or first box), as parked if it never moved: the returning car stopped re-arriving.
-RESUME_S = float(os.environ.get("AIPORT_RESUME_S") or 60)
+RESUME_S = envutil.env_float("AIPORT_RESUME_S", 60)
 RESUME_IOU = 0.4
 RESUME_MOVE_FRACTION = 0.25
 RESUME_MAX = 32
@@ -356,9 +331,8 @@ CONFIRM_WITH = {"face": "person", "licensePlate": "vehicle"}
 INSIDE_PARKED_FRACTION = 0.7
 # Motion gate: skip inference on a static frame with no open track, using Frigate's motion
 # boxes (AIPORT_MOTION_GATE=0 disables; without OpenCV it falls back to an average diff).
-MOTION_GATE = os.environ.get("AIPORT_MOTION_GATE", "1").strip().lower() not in (
-    "0", "false", "no", "off")
-MOTION_GATE_THRESH = float(os.environ.get("AIPORT_MOTION_GATE_THRESH", "0.02"))
+MOTION_GATE = envutil.env_bool("AIPORT_MOTION_GATE", True)
+MOTION_GATE_THRESH = envutil.env_float("AIPORT_MOTION_GATE_THRESH", 0.02)
 _GATE_STRIDE = 8  # sample every Nth pixel -> 80x80 grayscale for the diff
 # Zone reported when a track has none of its own; otherwise the zones it is actually in (a
 # web on the lens used to show under the upper zone because everything said zone 1).
@@ -401,7 +375,7 @@ FRAME_JPEG_KEEP_S = 2.0
 FRAME_JPEG_WAIT_S = 0.5  # how long a detection waits for its frame's JPEG
 # Full-res JPEGs per second of detection frames (AIPORT_FRAME_JPEG_FPS, 5): the source for
 # a track's best frame and thumbnail.
-FRAME_JPEG_FPS = float(os.environ.get("AIPORT_FRAME_JPEG_FPS") or 5)
+FRAME_JPEG_FPS = envutil.env_float("AIPORT_FRAME_JPEG_FPS", 5)
 FRAME_JPEG_EVERY = max(1, round(DETECT_FPS / FRAME_JPEG_FPS)) if FRAME_JPEG_FPS > 0 else 1
 _frame_jpeg_every = {}  # deviceID -> N of the running pull (a JPEG for detection frame 1, N+1, ...)
 _stream_dims = {}    # deviceID -> (width, height) of the real camera stream
@@ -452,11 +426,22 @@ _enrich_cache = {}    # deviceID -> (snapshot mtime, plate/face detections read 
 # which must push each channel to :7550 (see onvif_push.py).
 _onvif = onvif_push.PushManager(ffmpeg_bin=FFMPEG_BIN,
                                 push_factory=onvif_restream.Workers().push)
-# [hardware] detector / detector_model, set by main(); see detectors/__init__.py. The env
-# defaults also serve replay.py and the tests, which don't run main().
-DETECTOR_BACKEND = (os.environ.get("AIPORT_DETECTOR") or os.environ.get("AIPORT_BACKEND")
-                    or "auto").strip().lower()
-DETECTOR_MODEL = os.environ.get("AIPORT_MODEL_PATH") or None
+
+
+def _detector_settings(cfg=None):
+    """(backend, model path): the env, then [hardware] detector / detector_model, then auto.
+    AIPORT_BACKEND is the pre-modular name (auto|rknn|onnx); keep it working. One reader for
+    import time (replay.py and the tests, which don't run main()) and _init_detector; they were
+    two copies, and only the import-time one lower-cased the backend."""
+    cfg = cfg or {}
+    backend = (os.environ.get("AIPORT_DETECTOR") or os.environ.get("AIPORT_BACKEND")
+               or cfg.get("detector") or "auto").strip().lower()
+    model = os.environ.get("AIPORT_MODEL_PATH") or cfg.get("detector_model") or None
+    return backend, model
+
+
+# See detectors/__init__.py; main() re-reads these with the cfg file.
+DETECTOR_BACKEND, DETECTOR_MODEL = _detector_settings()
 
 
 def _get_detector():
@@ -635,9 +620,8 @@ def _frame_jpeg(device_id, seq, timeout=FRAME_JPEG_WAIT_S):
 
 # Region detection (Frigate's): aspect-correct detector frame, square crops around motion
 # and tracks (regions.py); on by default only on macOS.
-REGIONS = os.environ.get("AIPORT_REGIONS", "1" if sys.platform == "darwin" else "0"
-                         ).strip().lower() not in ("0", "false", "no", "off")
-DETECT_SIZE = int(os.environ.get("AIPORT_DETECT_SIZE") or 1280)
+REGIONS = envutil.env_bool("AIPORT_REGIONS", sys.platform == "darwin")
+DETECT_SIZE = envutil.env_int("AIPORT_DETECT_SIZE", 1280)
 PARKED_RECHECK_S = 10.0  # a parked object is re-detected this often (Frigate: 10 s of frames)
 
 
@@ -651,8 +635,7 @@ def _detect_dims(width=None, height=None):
 
 # Scale detector frames on the GPU (AIPORT_HW_SCALE, default on macOS): scale_vt keeps a
 # VideoToolbox stream on the GPU; a 1440p camera went from ~12% to ~2% of a core.
-HW_SCALE = os.environ.get("AIPORT_HW_SCALE", "1" if sys.platform == "darwin" else "0"
-                          ).strip().lower() not in ("0", "false", "no", "off")
+HW_SCALE = envutil.env_bool("AIPORT_HW_SCALE", sys.platform == "darwin")
 _hw_scale_failed = set()  # deviceIDs whose pull died with GPU scaling before any frame
 
 
@@ -724,12 +707,34 @@ def _shared_decode_source(device_id, url):
     if src.get("url") not in (None, url):
         return None
     fps = src.get("fps") or (_stream_probe.get(device_id) or {}).get("fps") or 20
-    return onvif_push.detect_socket(url), max(1, round(float(fps) / DETECT_FPS))
+    return onvif_push.detect_socket(url), _shared_decode_keep(fps)
 
 
-def _feed_shared_decode(device_id, proc, sock_path, every, walls):
+def _shared_decode_keep(fps):
+    """(keep, of): analyse `keep` of every `of` pushed frames, spread evenly. A whole
+    stride (every Kth frame) can't hit DETECT_FPS from 15 fps: live 2026-11-07 on
+    92DE633106E8 (15 fps) round(15/10) = 2 gave 7.5 fps and a "falling behind" warning
+    every minute. Integers, so ffmpeg's select and the wall-time feeder agree exactly."""
+    of = max(1, int(round(float(fps))))
+    return min(DETECT_FPS, of), of
+
+
+def _shared_decode_keeps(n, keep):
+    """True for input frame n (from 0) that the shared decode analyses: the frames where
+    floor(n * keep / of) steps up (Bresenham), keep of every `of`, evenly spread."""
+    k, of = keep
+    return (n + 1) * k // of > n * k // of
+
+
+def _shared_decode_select(keep):
+    """The ffmpeg select filter for _shared_decode_keeps (n counts input frames from 0)."""
+    k, of = keep
+    return f"select=gt(floor((n+1)*{k}/{of})\\,floor(n*{k}/{of}))"
+
+
+def _feed_shared_decode(device_id, proc, sock_path, keep, walls):
     """Copies the pushed video1 from its DetectServer into ffmpeg, queueing the wall time
-    of every `every`th video frame for the frame reader. Our encoder never reorders frames
+    of each video frame ffmpeg keeps (_shared_decode_keeps) for the frame reader. Our encoder never reorders frames
     (allow-frame-reordering=false), so each video tag decodes to one picture, in order."""
     import socket as socketlib
     sock = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
@@ -747,7 +752,7 @@ def _feed_shared_decode(device_id, proc, sock_path, every, walls):
         f = sock.makefile("rb", buffering=0)
         for kind, wall, data in onvif_push.read_detect_records(f.read):
             if kind == onvif_push.DETECT_FRAME:
-                if frames % every == 0:
+                if _shared_decode_keeps(frames, keep):
                     walls.append(wall)
                 frames += 1
             proc.stdin.write(data)
@@ -783,10 +788,10 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
     det_w, det_h = _detect_dims(width, height)
     rate = input_args = None
     if shared:
-        # Every Kth frame by count, not fps= by timestamp, so output frame n is input frame
-        # n*K and takes that frame's wall time (_feed_shared_decode).
-        sock_path, every = shared
-        codec, rate = "h264", f"select=not(mod(n\\,{every}))"
+        # Frames picked by count (_shared_decode_keeps), not fps= by timestamp, so each
+        # output frame is a known input frame and takes its wall time (_feed_shared_decode).
+        sock_path, keep = shared
+        codec, rate = "h264", _shared_decode_select(keep)
     pre_args, graph, hw, jpeg_every = _pull_video_args(codec, det_w, det_h, device_id,
                                                        direct=direct, rate=rate)
     if shared:
@@ -979,7 +984,7 @@ def _is_excluded(device_id, coord):
 # Something on the lens: a person box touching two adjacent edges (top/bottom plus a side)
 # and spanning LENS_MIN_HEIGHT is dropped on AIPORT_LENS_FILTER cameras.
 LENS_EDGE = 10
-LENS_MIN_HEIGHT = int(os.environ.get("AIPORT_LENS_MIN_HEIGHT", "900"))
+LENS_MIN_HEIGHT = envutil.env_int("AIPORT_LENS_MIN_HEIGHT", 900)
 _LENS_FILTER = {v.strip().upper() for v in os.environ.get("AIPORT_LENS_FILTER", "").split(",")
                 if v.strip()}
 
@@ -1062,7 +1067,6 @@ _redo_cache = {}   # deviceID -> [(monotonic s, label, cut-off box, detections o
 
 def _box_iou(a, b):
     """IoU of two (x1, y1, x2, y2) boxes."""
-    import regions
     inter = regions.intersection(a, b)
     if inter is None:
         return 0.0
@@ -1073,7 +1077,6 @@ def _box_iou(a, b):
 def _whole_of(d, got):
     """The detection in a second look that is the cut-off box's whole object: same label, the
     cut-off box mostly inside it. Only it is reused; anything else in that crop may move."""
-    import regions
     best = None
     for g in got:
         inter = regions.intersection(d["box"], g["box"])
@@ -1087,7 +1090,6 @@ def _whole_of(d, got):
 
 def _reused_redo(device_id, d, now, motion):
     """Detections of an earlier second look at this same cut-off box, or None."""
-    import regions
     if regions.intersects_any(d["box"], motion):
         return None
     for t, label, box, got in _redo_cache.get(device_id, ()):
@@ -1102,7 +1104,6 @@ def _detect_regions(device_id, detector, frame):
     (Frigate's process_frames), in detector-frame pixels. Parked objects are re-detected
     every PARKED_RECHECK_S or when motion touches them; otherwise they are passed on as
     their last box ("seeded"). The first frame of a stream gets a full startup look."""
-    import regions
     shape = frame.shape
     now = time.monotonic()
     with _motion_lock:
@@ -1653,7 +1654,7 @@ def _plate_settled(device_id, coord):
 # with its person. Live 2026-11-06 on the onvif instance: face boxes were sluggish next to
 # exact person boxes, because reads came from the 1 s snapshot file and each result was
 # re-sent with every newer frame's time until the next snapshot.
-ENRICH_INTERVAL_S = float(os.environ.get("AIPORT_ENRICH_INTERVAL_S") or 0.25)
+ENRICH_INTERVAL_S = envutil.env_float("AIPORT_ENRICH_INTERVAL_S", 0.25)
 _enrich_last_read = {}  # deviceID -> monotonic s of the last fresh plate/face read
 
 
@@ -1869,7 +1870,7 @@ def _jaro_winkler(a, b):
 # and the plate is final once PLATE_AGREE_READS agree; one confident misread used to stick.
 PLATE_READS_KEEP = 25
 PLATE_CLUSTER_SIMILARITY = 0.85
-PLATE_AGREE_READS = int(os.environ.get("AIPORT_LPR_AGREE_READS") or 3)
+PLATE_AGREE_READS = envutil.env_int("AIPORT_LPR_AGREE_READS", 3)
 
 
 def _plate_rep(reads):
@@ -1980,58 +1981,44 @@ def _merge_extra(tr, d, device_id=None, tracker_id=None):
             scores[key] = score
 
 
-def _iou(box_a, box_b):
-    """Intersection-over-union of two [x, y, w, h] boxes."""
-    ax1, ay1, aw, ah = box_a
-    bx1, by1, bw, bh = box_b
-    ax2, ay2 = ax1 + aw, ay1 + ah
-    bx2, by2 = bx1 + bw, by1 + bh
-    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-    inter = iw * ih
-    union = aw * ah + bw * bh - inter
-    return inter / union if union > 0 else 0.0
+# [x, y, w, h] IoU; one copy in regions, shared with replay.
+_iou = regions.iou_xywh
+
+
+def _valid_zones(zones_field):
+    """(id, zone, polygon) for each usable zone in a zones/excludeZones field: a dict with an
+    even-length coord of >= 3 points. The one filter every parser below shares, so the ids,
+    types and polygons stay index-aligned (they were four copies of the check, and only the
+    map skipped non-dict entries)."""
+    for key, zone in (zones_field or {}).items():
+        if not isinstance(zone, dict):
+            continue
+        coord = zone.get("coord") or []
+        if len(coord) >= 6 and len(coord) % 2 == 0:
+            yield key, zone, list(zip(coord[0::2], coord[1::2]))
 
 
 def _parse_zone_ids(zones_field):
     """Each zone's id (Protect's key for it, an int when numeric), in _parse_zones' order.
     Protect labels an event with the ids its descriptors name (zone:<camera>:<id>)."""
-    out = []
-    for key, zone in (zones_field or {}).items():
-        coord = zone.get("coord") or []
-        if len(coord) >= 6 and len(coord) % 2 == 0:
-            out.append(int(key) if str(key).isdigit() else key)
-    return out
+    return [int(key) if str(key).isdigit() else key for key, _, _ in _valid_zones(zones_field)]
 
 
 def _parse_zone_types(zones_field):
     """Each zone's objectTypes (None when it doesn't say), in _parse_zones' order."""
-    out = []
-    for zone in (zones_field or {}).values():
-        coord = zone.get("coord") or []
-        if len(coord) >= 6 and len(coord) % 2 == 0:
-            types = zone.get("objectTypes")
-            out.append(list(types) if isinstance(types, list) else None)
-    return out
+    return [list(z["objectTypes"]) if isinstance(z.get("objectTypes"), list) else None
+            for _, z, _ in _valid_zones(zones_field)]
 
 
 def _parse_zone_map(zones_field):
     """Parse zones/excludeZones into {zone_id: polygon}, keeping the controller's id."""
-    out = {}
-    for zone_id, zone in (zones_field or {}).items():
-        if not isinstance(zone, dict):
-            continue
-        coord = zone.get("coord") or []
-        if len(coord) >= 6 and len(coord) % 2 == 0:
-            out[str(zone_id)] = list(zip(coord[0::2], coord[1::2]))
-    return out
+    return {str(key): poly for key, _, poly in _valid_zones(zones_field)}
 
 
 def _parse_zones(zones_field):
     """Parse ChangeSmartDetectSettings zones/excludeZones into polygons
     (even-length coord, >= 3 points)."""
-    return list(_parse_zone_map(zones_field).values())
+    return [poly for _, _, poly in _valid_zones(zones_field)]
 
 
 def _parse_lines(lines_field):
@@ -2146,7 +2133,7 @@ def _dedupe_detections(detections, iou_thresh=0.4):
 # person box after that went to the animal track. A dog beside its walker is a far smaller
 # box, so overlaps far less. Vehicles stay out: a rider on a motorcycle can overlap it this
 # much and both count. AIPORT_CROSS_TYPE_IOU sets the overlap; 0 turns this off.
-CROSS_TYPE_IOU = float(os.environ.get("AIPORT_CROSS_TYPE_IOU") or 0.5)
+CROSS_TYPE_IOU = envutil.env_float("AIPORT_CROSS_TYPE_IOU", 0.5)
 CROSS_TYPE_RECENT_MS = 1000
 
 
@@ -2195,8 +2182,7 @@ def _motion_contour_area(device_id):
     blob, in pixels of the 100-row motion frame (Frigate's motion.contour_area; 10 by
     default, as in Frigate)."""
     import motion
-    default, per = _parse_box_delay(os.environ.get("AIPORT_MOTION_CONTOUR_AREA"),
-                                    "AIPORT_MOTION_CONTOUR_AREA", motion.DEFAULT_CONTOUR_AREA)
+    default, per = envutil.env_keyed("AIPORT_MOTION_CONTOUR_AREA", motion.DEFAULT_CONTOUR_AREA)
     return per.get(str(device_id).upper(), default)
 
 
@@ -2205,8 +2191,8 @@ def _motion_detector(device_id, shape):
     if det is None or det.frame_shape != tuple(shape[:2]):
         import motion
         settings = _motion_settings.get(device_id) or {}
-        override = os.environ.get("AIPORT_MOTION_THRESHOLD")
-        threshold = (int(override) if override and override.isdigit()
+        override = envutil.env_int("AIPORT_MOTION_THRESHOLD", None)
+        threshold = (override if override is not None and override >= 0
                      else motion.threshold_for_level(settings.get("level", 50)))
         mask = motion.zones_mask(settings.get("zones"), shape,
                                  lambda x, y: _canvas_to_image(device_id, x, y))
@@ -2263,12 +2249,9 @@ _event_start_ms = {}  # deviceID -> eventStartMSec from ChangeSmartDetectSetting
 
 
 def _confirm_ms(device_id):
-    override = os.environ.get("AIPORT_CONFIRM_MS")
-    if override:
-        try:
-            return max(0, int(override))
-        except ValueError:
-            log.warning("ignoring bad AIPORT_CONFIRM_MS %r", override)
+    override = envutil.env_int("AIPORT_CONFIRM_MS", None)
+    if override is not None:
+        return max(0, override)
     return _event_start_ms.get(device_id, 0)
 # A track still present when its event times out goes quiet (stationary) until its box
 # really leaves the parked spot; someone walking past only shrinks it for a moment.
@@ -2514,7 +2497,7 @@ LEAVE_FALLBACK_S = 4.0
 # 2026-10-29: a person sent at 51 and a vehicle at 68 both showed 30%), while
 # single-participant leaves, which carry a descriptor, showed their real score.
 # AIPORT_MULTI_LEAVE_DESCRIPTORS=0 goes back to empty descriptors.
-MULTI_LEAVE_DESCRIPTORS = os.environ.get("AIPORT_MULTI_LEAVE_DESCRIPTORS", "1") != "0"
+MULTI_LEAVE_DESCRIPTORS = envutil.env_bool("AIPORT_MULTI_LEAVE_DESCRIPTORS", True)
 _pending_leaves = {}  # snapshot filename -> shared {"seen": bool} for a multi-tracker leave
 
 
@@ -3783,9 +3766,9 @@ def _download_face_db(uri, device_info):
 # Protect's known faces (docs/protect-face-matching.md), reloaded when Protect sends a new
 # DB; a face names a subject after FACE_MATCH_HITS matches at AIPORT_FACE_DB_THRESH.
 FACE_MATCH_HITS = 2
-FACE_DB_THRESH = float(os.environ.get("AIPORT_FACE_DB_THRESH") or 0.45)
+FACE_DB_THRESH = envutil.env_float("AIPORT_FACE_DB_THRESH", 0.45)
 # Smallest face read (shorter side, snapshot px) whose embedding is sent to Protect.
-FACE_EMBED_MIN_PX = int(os.environ.get("AIPORT_FACE_EMBED_MIN_PX") or 60)
+FACE_EMBED_MIN_PX = envutil.env_int("AIPORT_FACE_EMBED_MIN_PX", 60)
 _face_db = None
 _face_db_tried = False
 
@@ -3801,23 +3784,9 @@ def _get_face_db():
     return _face_db
 
 
-def _parse_box_delay(spec, name="AIPORT_BOX_DELAY_MS", default=0):
-    """A per-camera integer setting such as AIPORT_BOX_DELAY_MS: "<default>[,<deviceID>=<value>
-    ...]" -> (default, {deviceID: value})."""
-    per = {}
-    for part in (spec or "").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            if "=" in part:
-                dev, ms = part.split("=", 1)
-                per[dev.strip().upper()] = int(ms)
-            else:
-                default = int(part)
-        except ValueError:
-            log.warning("ignoring bad %s entry %r", name, part)
-    return default, per
+def _parse_box_delay(spec):
+    """AIPORT_BOX_DELAY_MS: "<default>[,<deviceID>=<ms>...]" -> (default, {deviceID: ms})."""
+    return envutil.parse_keyed(spec, "AIPORT_BOX_DELAY_MS", 0)
 
 
 # Playback places boxes by clockWall; event times come from when the analysed frame left
@@ -3868,8 +3837,8 @@ def _frame_wall_ms(device_id):
 # clock* fields, and optionally shift clockWall, to see which clock Protect places boxes by.
 CAMERA_CLOCK_DEVICES = {d.strip().upper() for d in
                         os.environ.get("AIPORT_CAMERA_CLOCK", "").split(",") if d.strip()}
-_WALL_SKEW_DEFAULT_MS, _WALL_SKEW_MS = _parse_box_delay(
-    os.environ.get("AIPORT_CLOCK_WALL_SKEW_MS"), "AIPORT_CLOCK_WALL_SKEW_MS")
+_WALL_SKEW_DEFAULT_MS, _WALL_SKEW_MS = envutil.env_keyed(
+    "AIPORT_CLOCK_WALL_SKEW_MS", 0)
 _camera_clocks = {}  # deviceID -> camera_clock.Reader (kept across stream restarts)
 
 
@@ -4170,7 +4139,7 @@ def _camera_health(device_id, now):
 
 # A pull with no frame for this long is killed and restarted; the read timeout misses a
 # pull stuck past the socket.
-STREAM_STALL_S = float(os.environ.get("AIPORT_STREAM_STALL_S") or 30)
+STREAM_STALL_S = envutil.env_float("AIPORT_STREAM_STALL_S", 30)
 
 
 def _restart_stalled_pulls(now_ms=None):
@@ -4747,7 +4716,7 @@ def _clear_adopt_state():
 # 2026-10-28 through four removals. Live 2026-11-02 19:30 on the ONVIF test instance: 699 closes
 # in a row with a token in adopt_state.json, each a generic ConnectionClosedError. Ordinary
 # reconnects settled sooner (65-78 s on 2026-11-03 and 2026-11-04), so this waits longer.
-REFUSED_WARN_S = float(os.environ.get("AIPORT_REFUSED_WARN_S") or 180)
+REFUSED_WARN_S = envutil.env_float("AIPORT_REFUSED_WARN_S", 180)
 
 
 class _RefusalWatch:
@@ -4880,13 +4849,8 @@ def _init_detector(cfg):
     size. A failure is logged, not fatal: the device still pairs and relays
     snapshots, and classification retries the load each tick."""
     global DETECTOR_BACKEND, DETECTOR_MODEL
-    # AIPORT_BACKEND is the pre-modular name (auto|rknn|onnx); keep it working.
-    DETECTOR_BACKEND = (os.environ.get("AIPORT_DETECTOR")
-                        or os.environ.get("AIPORT_BACKEND")
-                        or cfg.get("detector") or "auto")
-    DETECTOR_MODEL = os.environ.get("AIPORT_MODEL_PATH") or cfg.get("detector_model") or None
-    if DETECTOR_BACKEND.strip().lower() == "none":
-        DETECTOR_BACKEND = "none"
+    DETECTOR_BACKEND, DETECTOR_MODEL = _detector_settings(cfg)
+    if DETECTOR_BACKEND == "none":
         log.info("detector backend 'none': object detection disabled")
         return
     try:

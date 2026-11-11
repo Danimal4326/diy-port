@@ -40,6 +40,15 @@ def _embedding(block):
     return block if NORM_RANGE[0] <= n <= NORM_RANGE[1] else None
 
 
+def _foreign_vector(item):
+    """Whether a whole item is one unit-length 512-float vector: a face model other than SFace,
+    such as the embeddings Protect's own cameras enrol (live 2026-11-10: 1 717 of 1 720 instances,
+    norm 0.9985, values rounded to 4 decimals). diy-port can't compare those with SFace's."""
+    if not np.all(np.isfinite(item)) or np.count_nonzero(item) < ITEM_DIM - 8:
+        return False
+    return 0.98 <= float(np.linalg.norm(item)) <= 1.02
+
+
 def _pairs(doc, key):
     items = doc.get(key) or []
     if isinstance(items, dict):
@@ -94,6 +103,7 @@ def parse(tar_bytes):
     ignored_subjects = set(doc.get("IgnoredSubjectIds") or [])
     ignored = set(doc.get("IngnoredInstanceIds") or doc.get("IgnoredInstanceIds") or [])
     instances = []
+    foreign, unusable = {}, []   # instance -> subject, for one summary line each
     for iid, sid in sorted(to_subject.items()):
         if sid in ignored_subjects or iid in ignored:
             continue
@@ -104,8 +114,20 @@ def parse(tar_bytes):
             item = np.frombuffer(data[start:start + 4 * ITEM_DIM], dtype="<f4").astype(np.float64)
             found = [e for e in (_embedding(item[b:b + DIM]) for b in BLOCKS) if e is not None]
         if not found:
-            log.warning("face DB instance %s (subject %s) has no usable embedding", iid, sid)
+            if _foreign_vector(item):
+                foreign[iid] = sid
+            else:
+                unusable.append(iid)
+            log.debug("face DB instance %s (subject %s) has no usable embedding", iid, sid)
         instances += [(iid, sid, names.get(sid) or "", e) for e in found]
+    if foreign:
+        log.warning("face DB: %d instance(s) of %d subject(s) hold a 512-float face vector from "
+                    "another model (Protect's own cameras), not SFace's -- they can't be matched; "
+                    "name faces diy-port detected to enrol ones it can", len(foreign),
+                    len(set(foreign.values())))
+    if unusable:
+        log.warning("face DB: %d instance(s) have no usable embedding (e.g. %s)", len(unusable),
+                    ", ".join(map(str, unusable[:5])))
     return FaceDB(instances)
 
 

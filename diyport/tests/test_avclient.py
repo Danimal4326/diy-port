@@ -1477,6 +1477,18 @@ class TestCameraEvent(Base):
         parked.pop("stationary_coord")
         self.assertTrue(av._parent_moving(tracks, face))
 
+    def test_plate_confirms_only_with_its_containing_vehicle(self):
+        near = {"objectType": "vehicle", "confirmed": True, "coord": [0, 0, 100, 100]}
+        far = {"objectType": "vehicle", "confirmed": True, "coord": [500, 500, 100, 100]}
+        plate = {"objectType": "licensePlate", "coord": [10, 10, 20, 20]}
+        tracks = {1: near, 2: far}
+        self.assertTrue(av._parent_moving(tracks, plate))
+        self.assertIs(av._parent_track(tracks, plate), near)
+        near["stationary_coord"] = [0, 0, 100, 100]
+        self.assertFalse(av._parent_moving(tracks, plate))  # the moving far vehicle doesn't own it
+        outside = {"objectType": "licensePlate", "coord": [900, 900, 10, 10]}
+        self.assertFalse(av._parent_moving(tracks, outside))
+
     def test_closed_event_clears_event_ids_from_parked_tracks(self):
         for _ in range(av.STILL_TICKS + 3):
             self.tick(self.PERSON, self.FACE)

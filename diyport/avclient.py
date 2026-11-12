@@ -2328,17 +2328,33 @@ def _person_moving(tracks, face):
     return person is not None and not person.get("stationary_coord")
 
 
-def _parent_moving(tracks, tr):
-    """Whether the parent that owns this face/plate is confirmed and moving. A face uses
-    its own person_tid, not any moving person in the frame."""
+def _parent_track(tracks, tr):
+    """The track that owns this face/plate, by its own link or the box that contains it."""
     if tr["objectType"] == "face":
-        parent = tracks.get(tr.get("person_tid"))
-        return (parent is not None and parent.get("confirmed", True)
-                and not parent.get("stationary_coord"))
-    kind = CONFIRM_WITH.get(tr["objectType"])
-    return kind is not None and any(
-        p["objectType"] == kind and p.get("confirmed", True)
-        and not p.get("stationary_coord") for p in tracks.values())
+        return tracks.get(tr.get("person_tid"))
+    if tr["objectType"] != "licensePlate":
+        return None
+    x, y, w, h = tr["coord"]
+    cx, cy = x + w / 2, y + h / 2
+    found, best = None, None
+    for p in tracks.values():
+        if p["objectType"] != "vehicle" or not p.get("confirmed", True) \
+                or p.get("stationary_coord"):
+            continue
+        px, py, pw, ph = p["coord"]
+        if not (px <= cx <= px + pw and py <= cy <= py + ph):
+            continue
+        dist = abs(cx - (px + pw / 2)) + abs(cy - (py + ph / 2))
+        if best is None or dist < best:
+            found, best = p, dist
+    return found
+
+
+def _parent_moving(tracks, tr):
+    """Whether the parent that owns this face/plate is confirmed and moving."""
+    parent = _parent_track(tracks, tr)
+    return (parent is not None and parent.get("confirmed", True)
+            and not parent.get("stationary_coord"))
 
 
 def _event_face(dev, d, event):

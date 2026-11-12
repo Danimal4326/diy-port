@@ -12,7 +12,7 @@ import time
 
 import onvif_push
 
-log = logging.getLogger("diyport.avclient")
+log = logging.getLogger("aiport-avclient")
 
 
 def keep_ratio(fps, detect_fps):

@@ -46,6 +46,33 @@ still paired elsewhere. Protect issues new stream names, so expect about a minut
 `ended after ... BrokenPipeError` before it settles. The camera's per-camera settings don't
 follow it; add them to the new instance's `diyport.env`.
 
+## Implementation notes
+
+The mode is `AIPORT_ONVIF_MODE`: a default, then per-camera exceptions such as
+`isolated,AABBCCDDEEFF=copy`, so cameras move one at a time.
+
+`copy` (the default) has ffmpeg pull the camera's main stream and substream and copy them;
+pushes run in `avclient.py` and it works anywhere.
+
+`transcode` follows the real AI Port. Its `ubnt_av_aiport` (v5.1.12, Ghidra) pulls the main
+stream once with `rtspsrc protocols=tcp latency=500 tcp-timeout=5000000`, decodes it once
+(`v4l2dec`) and re-encodes one stream per channel (S0 with a 1 s GOP, S1 GOP 24 at 2 Mbps,
+S2 at 300 kbps), so every channel Protect plays was made by its own encoder at a steady
+rate. Here one `gst-launch` does the same with VideoToolbox (`vtdec`, one `vtenc_h264` per
+channel), each channel on its own pipe: one RTSP session per camera instead of main +
+substream. `video2` is encoded at the substream's size and `video3` at
+`TRANSCODE_VIDEO3_HEIGHT`, as Protect is told. macOS only; needs `brew install gstreamer`
+(1.28.8 tested). Live 2026-11-03/04 on Driveway: more stable than ffmpeg or a copied
+GStreamer pull, with a better picture, and it held 20 fps for 10 h 48 min.
+
+It also sends clock syncs as yi-protect's `FlvPush` does, matching a real G3: `onMpma` +
+`onClockSync` at connection start (after `onMetaData`, before the codec configs), then
+`onClockSync` + `onMpma` before every key frame, 10 s fallback. Live 02:22 on Driveway
+(2026-11-03): Protect plays this camera through an fMP4 player with `useWallClock=1`
+(unifi-cam-proxy's Driveway gets a UBNT one), and with a sync every 5 s a cold start played
+~1 s then paused ~5 s, as if waiting for the next sync to place frames on the wall clock.
+A sync every 1 s was worse; G3 sync was "very stable".
+
 ## Known limits
 
 - A wedged `copy` pull logs `restream: no video to Protect`, but only a transcode has a pipeline

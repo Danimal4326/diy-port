@@ -805,11 +805,12 @@ not responsible or liable for any loss or damage arising from its use.**
 ## Security
 
 Report vulnerabilities privately via GitHub Security Advisories. Runtime state -
-the adoption token and the mTLS client certificate/key - is written to the
-instance state directory (`--state-dir`) and excluded by `.gitignore`; never
-commit it. No secrets are stored in this repository. Logged payloads are passed
-through a redaction filter for camera RTSP credentials, the console's login
-password and adoption tokens.
+the adoption token and the mTLS client certificate/key - belongs in the instance
+state directory passed as `--state-dir`; the service and launchd installers
+always pass one. A manual run without it falls back to the `diyport/` directory,
+so pass `--state-dir` and keep that path out of git. No secrets are stored in
+this repository. Logged payloads are passed through a redaction filter for camera
+RTSP credentials, the console's login password and adoption tokens.
 
 ## License
 

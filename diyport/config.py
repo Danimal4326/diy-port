@@ -362,8 +362,12 @@ def make_stream_dir(path):
     parent = os.path.dirname(path)
     try:
         os.mkdir(parent)
-        os.chmod(parent, 0o1777)
     except FileExistsError:
+        pass
+    try:
+        # Also fix a parent left 0755 by an older version or another instance.
+        os.chmod(parent, 0o1777)
+    except OSError:
         pass
     os.makedirs(path, exist_ok=True)
 

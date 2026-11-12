@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 The DIY-Port project
 """Shared decode for transcoded ONVIF cameras (AIPORT_ONVIF_SHARED_DECODE): detection decodes
 the video1 that onvif_push sends Protect, read from its DetectServer socket, instead of
 pulling the camera a second time. Each analysed frame takes the wall time the push gave

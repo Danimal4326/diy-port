@@ -7,8 +7,8 @@ all of that instance's cameras.
 | Mode | Video | Pushes run in | Camera sessions | Cost per camera |
 |---|---|---|---|---|
 | `copy` (default) | ffmpeg copies the streams | `avclient.py` | 3 | About 1% of a core, 22 MB |
-| `transcode` | GStreamer encodes each channel | `avclient.py` | 2 | About 8-15% of a core, 130-290 MB |
-| `isolated` | As `transcode` | A process per camera | 2 | As `transcode`, plus 15 MB |
+| `transcode` | GStreamer encodes each channel | `avclient.py` | 1 (2 with shared decode off) | About 8-15% of a core, 130-290 MB |
+| `isolated` | As `transcode` | A process per camera | 1 (2 with shared decode off) | As `transcode`, plus 15 MB |
 
 Move one camera at a time: `copy,<deviceID>=isolated`.
 
@@ -54,4 +54,9 @@ follow it; add them to the new instance's `diyport.env`.
   size. A later reply corrects it.
 - Restarts drop the recording segment in progress on the main channel, so expect a gap of up to
   about 9 s in that channel's recording.
+- If Protect re-sends the settings for every configured channel at once, the shared pull is
+  stopped and recreated; with shared decode on, detection pauses for that moment. A partial
+  re-send keeps the pull (and detection) running.
 - `isolated` only contains failures one way: if `avclient.py` dies, the pushes stop too.
+  With shared decode on, detection reads the pushed video1, so a restream process crash
+  also pauses detection until its replacement starts.

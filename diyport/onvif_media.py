@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 The DIY-Port project
 """An ONVIF camera's media profiles, for pushing its substream on a low channel.
 
 Protect's OnvifStreamControl names one RTSP URL (the camera's main profile), so

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 The DIY-Port project
 """Unit tests for onvif_media.py: profile parsing, substream choice, and the SOAP
 calls (against canned responses shaped like a Hikvision camera's)."""
 import os

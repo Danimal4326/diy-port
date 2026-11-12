@@ -64,6 +64,13 @@ def _endpoint_ok(url, allowed, schemes, allow_userinfo=False):
     return True
 
 
+def _read_capped(resp):
+    data = resp.read(MAX_SOAP_BYTES + 1)
+    if len(data) > MAX_SOAP_BYTES:
+        raise ValueError("ONVIF response too large")
+    return data
+
+
 def _device_bases(main_url):
     """(scheme://host[:port], ...) to try for the device service, most likely first."""
     parts = urlsplit(main_url)
@@ -195,10 +202,7 @@ def fetch_profiles(main_url, timeout=5.0, post=None):
         req = urllib.request.Request(url, data=data, headers={
             "Content-Type": "application/soap+xml; charset=utf-8"})
         with _OPENER.open(req, timeout=timeout) as resp:
-            data = resp.read(MAX_SOAP_BYTES + 1)
-        if len(data) > MAX_SOAP_BYTES:
-            raise ValueError("ONVIF response too large")
-        return data
+            return _read_capped(resp)
 
     media = bases[0] + "/onvif/Media"
     for base in bases:

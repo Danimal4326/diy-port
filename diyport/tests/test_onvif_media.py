@@ -229,27 +229,17 @@ class TestFetch(unittest.TestCase):
             with self.assertRaises(urllib.error.URLError):
                 onvif_media.fetch_profiles("rtsp://127.0.0.1/101", timeout=1)
 
-    def test_large_soap_response_is_rejected(self):
-        class Large(http.server.BaseHTTPRequestHandler):
-            def do_POST(self):
-                body = b"x" * (onvif_media.MAX_SOAP_BYTES + 1)
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+    def test_large_soap_response_is_capped(self):
+        class Response:
+            def __init__(self, data):
+                self.data = data
 
-            def log_message(self, *args):
-                pass
+            def read(self, n):
+                return self.data[:n]
 
-        server = http.server.HTTPServer(("127.0.0.1", 0), Large)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
-        with mock.patch.object(onvif_media, "ONVIF_HTTP_PORT", server.server_address[1]), \
-                mock.patch.object(onvif_media, "ONVIF_SCHEME", "http"):
-            with self.assertRaises(ValueError):
-                onvif_media.fetch_profiles("rtsp://127.0.0.1/101", timeout=1)
+        self.assertEqual(onvif_media._read_capped(Response(b"x" * 10)), b"x" * 10)
+        with self.assertRaises(ValueError):
+            onvif_media._read_capped(Response(b"x" * (onvif_media.MAX_SOAP_BYTES + 1)))
 
     def test_no_login_without_userinfo(self):
         self.assertNotIn("Security", onvif_media._envelope("<x/>", "", ""))

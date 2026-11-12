@@ -1,22 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 The DIY-Port project
-"""Intel OpenVINO backend: Intel iGPU / Arc GPU, Core Ultra NPU, or OpenVINO's CPU plugin.
+"""Intel OpenVINO backend: Intel iGPU / Arc GPU, Core Ultra NPU, or its CPU plugin.
 
-Loads the same models as the cpu backend -- an ONNX file read directly (default
-models/yolov5n.onnx: Ultralytics YOLOv5 [1,N,85], Rockchip's three raw heads, or an
-anchor-free YOLOv8/v9/v11 [1,84,N] export such as Frigate's yolov9-s-320.onnx) -- or an
-OpenVINO IR (.xml next to its .bin). The layout and input size are read from the graph;
-a dynamic input is pinned to 640x640, as GPU/NPU compilation wants static shapes.
-
-The uint8 NHWC -> float NCHW /255 conversion is folded into the compiled model
-(OpenVINO preprocessing), so it runs on the device instead of in numpy.
-
-AIPORT_OV_DEVICE picks where the model runs: "auto" (default) takes the first GPU, then
-an NPU, then the CPU; anything else is passed to OpenVINO as is (GPU, GPU.1, NPU, CPU,
-or its own "AUTO:GPU,CPU"-style plugins). A device that fails to compile the model
-falls back to CPU. Compiled blobs are cached in AIPORT_OV_CACHE_DIR (default
-models/openvino_cache; blank disables) -- a GPU compile takes seconds, a cached one
-loads in well under one.
+Loads the cpu backend's models (ONNX directly, or an OpenVINO IR .xml + .bin); the
+layout and input size are read from the graph, and a dynamic input is pinned to
+640x640. Preprocessing (uint8 NHWC -> float NCHW /255) is folded into the graph.
+AIPORT_OV_DEVICE picks GPU, NPU or CPU (default auto, GPU -> NPU -> CPU), with a
+CPU fallback when compilation fails; compiled blobs cache in AIPORT_OV_CACHE_DIR.
 """
 import glob
 import logging

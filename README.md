@@ -303,9 +303,9 @@ python3 scripts/detector_check.py --backend openvino --image bus.jpg --expect pe
 
 `docker/` builds one image for `linux/amd64` and `linux/arm64` (Pi 4/5); the
 detector backend is selected at build time (`ACCEL=cpu` by default,
-`edgetpu`, or `openvino` for an Intel GPU on amd64; pass `/dev/dri` in, see the
-commented `devices:` in `compose.yaml`). The repo-root `compose.yaml` is the single-instance stack (host
-networking) and the **Komodo** Stack file:
+`edgetpu`, or `openvino` for an Intel GPU on amd64; pass `/dev/dri` in, see
+the commented `devices:` in `compose.yaml`). The repo-root `compose.yaml` is
+the single-instance stack (host networking) and the **Komodo** Stack file:
 
 ```bash
 docker build -f docker/Dockerfile -t diyport-cpu .

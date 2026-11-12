@@ -623,8 +623,9 @@ conversion is folded into the compiled graph, so it runs on the device. `scripts
   load takes ~0.2 s.
 - **Measured** on an i5-1240P (Iris Xe iGPU, OpenVINO 2026.4.1, yolov5n 640x640):
   `detect()` ~13 ms/frame on the GPU, ~27 ms on OpenVINO's CPU plugin, ~33 ms for the `cpu`
-  (onnxruntime) backend. The GPU numbers match bare metal and in the Docker image. Detections on Rockchip's `bus.jpg` matched the `cpu` backend's to within a
-  pixel.
+  (onnxruntime) backend. The GPU numbers match bare metal and in the Docker
+  image. Detections on Rockchip's `bus.jpg` matched the `cpu` backend's to
+  within a pixel.
 
 Quick check after setup (exits non-zero if no person is found):
 

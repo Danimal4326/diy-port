@@ -26,9 +26,8 @@ DEFAULT_RKNN_SHA256="f4fd0122ecca3117323b8268d270e6cc293e364d6a9dda8e83293d64c83
 # 2.3.0); sha256 per <distro>_<arch> from the release digests.
 LIBEDGETPU_TAG="16.0TF2.19.1-1"
 LIBEDGETPU_VER="16.0tf2.19.1-1"
-# Intel GPU compute runtime for OpenVINO where apt has no intel-opencl-icd
-# (Debian trixie). compute-runtime 26.35.39758.10 + its IGC v2.41.5; sha256s
-# from Intel's ww35.sum and the IGC release assets. amd64 only.
+# Intel GPU runtime for OpenVINO where apt has no intel-opencl-icd (trixie):
+# compute-runtime 26.35.39758.10 + IGC v2.41.5, sha256-pinned; amd64 only.
 NEO_TAG="26.35.39758.10"
 IGC_TAG="v2.41.5"
 declare -A NEO_DEBS=(

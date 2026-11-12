@@ -1365,7 +1365,7 @@ def retry_delay(retry_s, failed):
 
 # Protect re-sends a channel's ChangeVideoSettings (same streamName) when its media server
 # has lost that stream: it rebuilds its ingest point and waits ~10 s for a fresh connection.
-# Live 2026-10-29: ignoring the repeat left video3 in "Timed out waiting for 80BEAF928356_2
+# Live 2026-10-29: ignoring the repeat left video3 in "Timed out waiting for <deviceID>_2
 # to open" every 30 s and the low-quality view stuttering; unifi-cam-proxy reconnects on a
 # repeat. At most one reconnect per channel per RECONNECT_MIN_S, so a burst doesn't churn it.
 RECONNECT_MIN_S = 10

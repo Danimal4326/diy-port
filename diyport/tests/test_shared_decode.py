@@ -12,7 +12,7 @@ DETECT_FPS = 10
 
 
 class TestSharedDecodeKeep(unittest.TestCase):
-    """Live 2026-11-07 on 92DE633106E8 (15 fps): a whole stride, round(15/10) = 2, gave
+    """Live 2026-11-07 on a 15 fps camera,: a whole stride, round(15/10) = 2, gave
     7.5 fps and "falling behind" every minute; keep 10 of every 15, evenly spread."""
 
     def kept(self, fps, n=60):

@@ -3541,7 +3541,7 @@ class TestPullVideoArgs(unittest.TestCase):
             "Impossible to convert between the formats supported by the filter "
             "'Parsed_scale_vt_0' and the filter 'auto_scale_0'"))
         for stream_error in ("[in#0/rtsp @ 0x7a] Failed reading RTSP data: End of file",
-                             "Connection to tcp://192.168.1.42:554 failed: No route to host",
+                             "Connection to tcp://192.0.2.10:554 failed: No route to host",
                              "", None):
             self.assertFalse(av._gpu_scaling_error(stream_error))
 

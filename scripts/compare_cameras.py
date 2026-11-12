@@ -5,7 +5,7 @@ replacement on two instances. For each camera, over the last --minutes: objects 
 Protect (distinct tracks by type), plates read, frame rates, time per detection pass, minutes
 falling behind, and stream trouble. Appends one line per camera to --out.
 
-  scripts/compare_cameras.py native:AABBCC3344CC:old onvif:80BEAF928356:onvif
+  scripts/compare_cameras.py native:AABBCC000001:relayed onvif:AABBCC000002:onvif
 
 Each camera is instance:deviceID[:label]; the instance's log is
 ~/.diy-port/<instance>/logs/diyport.log. Standard library only, so Apple's python3 runs it.

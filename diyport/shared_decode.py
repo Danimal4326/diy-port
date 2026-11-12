@@ -17,7 +17,7 @@ log = logging.getLogger("diyport.avclient")
 def keep_ratio(fps, detect_fps):
     """(keep, of): analyse `keep` of every `of` pushed frames, spread evenly. A whole
     stride (every Kth frame) can't hit detect_fps from 15 fps: live 2026-11-07 on
-    92DE633106E8 (15 fps) round(15/10) = 2 gave 7.5 fps and a "falling behind" warning
+    a 15 fps camera, round(15/10) = 2 gave 7.5 fps and a "falling behind" warning
     every minute. Integers, so ffmpeg's select and the wall-time feeder agree exactly."""
     of = max(1, int(round(float(fps))))
     return min(detect_fps, of), of

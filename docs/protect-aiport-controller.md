@@ -232,7 +232,8 @@ at the console's own `/internal/update/...` copy of the same file.
 
 Ranked by impact. Each was checked against both codebases.
 
-1. **The LPR-flag message wipes zones and lines.** On every AI Port connect, step 7
+1. ~~**The LPR-flag message wipes zones and lines.**~~ Fixed: `ChangeSmartDetectSettings`
+   now keeps the keys a partial update omits. Original finding: On every AI Port connect, step 7
    above sends `ChangeSmartDetectSettings {isLprCamera, deviceID}`. diy-port's handler
    (`avclient.py` `handle_function`) replaces `excludeZones`, `zones` and `lines` with
    whatever the payload has, which is nothing. So after a reconnect, exclude zones
@@ -259,7 +260,9 @@ Ranked by impact. Each was checked against both codebases.
    devices, but it also picks the adopt path (`/api/adopt` vs `/api/1.2/manage`), so
    re-test adoption.
 
-5. **Third-party (ONVIF) cameras pair but get no detection and likely no video.**
+5. ~~**Third-party (ONVIF) cameras pair but get no detection and likely no video.**~~
+   Fixed: diy-port pulls `streamUrl`, pushes video1-3 and audio to Protect, and runs
+   detection on it (`onvif_push.py`, `docs/onvif-modes.md`). Original finding:
    diy-port replies `started` to `OnvifStreamControl` without pulling `streamUrl`.
    Protect has stopped ingesting that camera directly and expects the AI Port to push
    its video, so the camera probably stops recording as well as getting no detections.

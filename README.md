@@ -678,8 +678,8 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
   flags list no audio types, so those detections are turned off while the camera is
   paired.
 - **Known:** an assigned ONVIF camera depends on the AI Port for its video (no
-  recording while the AI Port is down), gets the main stream on every channel,
-  and AAC instead of Opus audio.
+  recording while the AI Port is down). video1 carries the main stream and
+  video2/video3 the camera's substream; audio is pushed as AAC and Opus.
 - **Known:** in the same-host Docker setup the AI Port is only reachable from
   its own host, so it only suits a console running on that host.
 - **Known:** on the Raspberry Pi 4 the H.264 hardware decoder is instance-limited

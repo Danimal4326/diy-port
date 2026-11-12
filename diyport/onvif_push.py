@@ -1599,6 +1599,12 @@ class PushManager:
             sub = self._subs.get(src["url"]) if src else None
             return {k: sub[k] for k in ("width", "height", "fps")} if sub else None
 
+    def substream_pending(self, device_id):
+        """True while this camera's profile lookup is still running."""
+        with self._lock:
+            src = self._sources.get(device_id)
+            return bool(src and src["url"] in self._looking_up)
+
     def transcode_channels(self, device_id):
         """{channel: {width, height, fps, bitrate}} of what each channel is encoded at under
         TRANSCODE, leaving out what isn't known; None when this camera isn't transcoded. So

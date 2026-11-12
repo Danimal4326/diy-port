@@ -2946,8 +2946,14 @@ class TestStreamControlUsedPoints(unittest.TestCase):
     def _reply(self, fn, payload):
         ws = _FakeWS()
         av.handle_function(ws, {"functionName": fn, "messageId": "m", "payload": payload}, {})
-        return next(json.loads(m)["payload"] for m in ws.sent
-                    if json.loads(m)["functionName"] == fn)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            for sent in list(ws.sent):
+                reply = json.loads(sent)
+                if reply["functionName"] == fn:
+                    return reply["payload"]
+            time.sleep(0.01)
+        self.fail(f"no {fn} reply")
 
     def test_onvif_stop_reply_has_used_points(self):
         reply = self._reply("OnvifStreamControl", {"streaming": False})
@@ -3048,13 +3054,25 @@ class TestOnvifChannelGeometry(unittest.TestCase):
 
     def _start_camera(self, start_stream):
         ws = _FakeWS()
-        with mock.patch.object(av, "_start_stream", side_effect=start_stream), \
+        done = threading.Event()
+
+        def run(*args, **kwargs):
+            try:
+                return start_stream(*args, **kwargs)
+            finally:
+                done.set()
+
+        with mock.patch.object(av, "_start_stream", side_effect=run), \
                 mock.patch.object(av, "_start_motion_detector"), \
                 mock.patch.object(av, "_start_status_watch"):
             av.handle_function(ws, {"functionName": "OnvifStreamControl", "messageId": "m",
                                     "payload": {"deviceID": "CAMX", "streaming": True,
                                                 "streamUrl": "rtsp://cam/101", "width": 2560,
                                                 "height": 1440, "fps": 20}}, {})
+            self.assertTrue(done.wait(2), "ONVIF start worker did not finish")
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and av._onvif.source("CAMX") is None:
+                time.sleep(0.01)
         self.addCleanup(lambda: (av._stream_probe.pop("CAMX", None),
                                  av._stream_points.pop("CAMX", None),
                                  av._stream_started_at.pop("CAMX", None)))
@@ -3073,6 +3091,31 @@ class TestOnvifChannelGeometry(unittest.TestCase):
         src = self._start_camera(lambda *a, **k: av._stream_probe.pop("CAMX", None))
         self.assertEqual((src["width"], src["height"]), (1920, 1080))
 
+    def test_start_returns_before_a_slow_probe(self):
+        started, release = threading.Event(), threading.Event()
+        ws = _FakeWS()
+
+        def slow(*args, **kwargs):
+            started.set()
+            release.wait(2)
+
+        with mock.patch.object(av, "_start_stream", side_effect=slow), \
+                mock.patch.object(av, "_start_motion_detector"), \
+                mock.patch.object(av, "_start_status_watch"):
+            began = time.monotonic()
+            av.handle_function(ws, {"functionName": "OnvifStreamControl", "messageId": "m",
+                                    "payload": {"deviceID": "CAMX", "streaming": True,
+                                                "streamUrl": "rtsp://cam/101"}}, {})
+            self.assertLess(time.monotonic() - began, 0.2)
+            self.assertTrue(started.wait(1), "start worker never ran")
+            release.set()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not ws.sent:
+                time.sleep(0.01)
+        self.assertTrue(ws.sent)
+        self.addCleanup(lambda: (av._stream_points.pop("CAMX", None),
+                                 av._stream_started_at.pop("CAMX", None)))
+
     def test_first_failed_probe_uses_the_announced_size(self):
         src = self._start_camera(lambda *a, **k: None)
         self.assertEqual((src["width"], src["height"]), (2560, 1440))
@@ -3081,6 +3124,54 @@ class TestOnvifChannelGeometry(unittest.TestCase):
         src = self._start_camera(OSError("no ffmpeg"))
         self.assertEqual(src["url"], "rtsp://cam/101")
 
+
+class TestOnvifRepliesOffThread(unittest.TestCase):
+    class FakeOnvif:
+        def __init__(self):
+            self.sub = None
+
+        def configure(self, device_id, video):
+            pass
+
+        def source(self, device_id):
+            return {"url": "rtsp://cam/101", "audio": True, "width": 2560, "height": 1440,
+                    "fps": 20}
+
+        def substream_pending(self, device_id):
+            return True
+
+        def substream(self, device_id):
+            return self.sub
+
+        def wait_for_substream(self, device_id, timeout=10):
+            time.sleep(0.2)
+            self.sub = {"width": 640, "height": 360, "fps": 15}
+
+        def transcode_channels(self, device_id):
+            return None
+
+    def test_change_video_settings_replies_first_and_corrects_later(self):
+        fake = self.FakeOnvif()
+        saved = av._onvif
+        av._onvif = fake
+        self.addCleanup(lambda: setattr(av, "_onvif", saved))
+        self.addCleanup(av._stream_probe.pop, "CAMX", None)
+        dest = {"avSerializer": {"type": "extendedFlv", "parameters": {"streamName": "S"},
+                                 "destinations": ["tcp://192.0.2.1:7550"]}}
+        ws = _FakeWS()
+        began = time.monotonic()
+        av.handle_function(ws, {"functionName": "ChangeVideoSettings", "messageId": "m",
+                                "payload": {"deviceID": "CAMX", "video": {
+                                    "video1": dest, "video2": dest, "video3": dest}}}, {})
+        self.assertLess(time.monotonic() - began, 0.2)
+        first = json.loads(ws.sent[0])["payload"]["video"]
+        self.assertEqual(first["video2"]["width"], 2560)     # main, until the lookup lands
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and len(ws.sent) < 2:
+            time.sleep(0.01)
+        self.assertGreaterEqual(len(ws.sent), 2)
+        second = json.loads(ws.sent[-1])["payload"]["video"]
+        self.assertEqual((second["video2"]["width"], second["video2"]["height"]), (640, 360))
 
 class TestRefusalWatch(unittest.TestCase):
     """Protect hanging up on an adopted AI Port says nothing, so diy-port has to notice.

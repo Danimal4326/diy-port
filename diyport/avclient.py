@@ -473,6 +473,9 @@ def build_ssl_context():
     return ctx
 
 
+_send_lock = threading.Lock()
+
+
 def send_msg(ws, functionName, payload, to="ubnt_avclient", in_response_to=None,
              response_expected=False, from_="UniFiVideo"):
     msg = {
@@ -489,7 +492,8 @@ def send_msg(ws, functionName, payload, to="ubnt_avclient", in_response_to=None,
         "inResponseTo": in_response_to if in_response_to is not None else 0,
     }
     # Controller sends/expects plain JSON as BINARY frames (opcode 0x2), not text.
-    ws.send(json.dumps(msg).encode())
+    with _send_lock:
+        ws.send(json.dumps(msg).encode())
     log.info(">>> sent %s (id=%s) payload=%s", functionName, msg["messageId"], payload)
 
 
@@ -4459,6 +4463,122 @@ def _onvif_main_size(device_id, payload):
     return payload.get("width"), payload.get("height")
 
 
+_onvif_reply_lock = threading.Lock()
+_onvif_reply_waiting = set()
+_onvif_start_locks = {}
+_onvif_start_locks_lock = threading.Lock()
+
+
+def _onvif_start_lock(device_id):
+    with _onvif_start_locks_lock:
+        return _onvif_start_locks.setdefault(device_id, threading.Lock())
+
+
+def _onvif_video_settings(ws, msg_id, payload, src=None):
+    """Send the ChangeVideoSettings reply from the sizes known now.
+
+    Returns the substream dict used, or None when the camera is on its main stream."""
+    device_id = payload.get("deviceID")
+    src = src or (_onvif.source(device_id) if device_id else None)
+    if not src:
+        send_msg(ws, "ChangeVideoSettings", {
+            "video": {
+                "video1": {"enabled": True, "width": 1920, "height": 1080,
+                           "fps": 25, "bitrate": 4000000},
+                "video2": {"enabled": False},
+                "video3": {"enabled": False},
+            },
+            "audio": {"enabled": False, "volume": 100},
+        }, in_response_to=msg_id)
+        return None
+    probe = _stream_probe.get(device_id) or {}
+    channel = {"enabled": True,
+               "width": probe.get("width") or src["width"] or 1920,
+               "height": probe.get("height") or src["height"] or 1080,
+               "fps": probe.get("fps") or src["fps"] or 15,
+               "bitrate": 8000000}
+    sub = _onvif.substream(device_id)
+    sub_channel = {"enabled": True, "width": sub["width"], "height": sub["height"],
+                   "fps": sub["fps"] or channel["fps"], "bitrate": 1000000} if sub else None
+    video = {k: dict(sub_channel if sub and k in onvif_push.SUB_CHANNELS else channel)
+             for k in payload["video"]}
+    encoded = _onvif.transcode_channels(device_id) or {}
+    for k in video:
+        video[k].update(encoded.get(k) or {})
+    send_msg(ws, "ChangeVideoSettings", {
+        "video": video,
+        "audio": {"enabled": not _reports_audio_off(device_id), "volume": 100},
+    }, in_response_to=msg_id)
+    return sub
+
+
+def _correct_onvif_video_settings(device_id, ws, msg_id, payload, first_sub):
+    """After a background lookup, send a corrected reply if the substream changed."""
+    with _onvif_reply_lock:
+        if device_id in _onvif_reply_waiting:
+            return
+        _onvif_reply_waiting.add(device_id)
+
+    def run():
+        try:
+            _onvif.wait_for_substream(device_id)
+            if _onvif.substream(device_id) != first_sub:
+                _onvif_video_settings(ws, msg_id, payload)
+        except Exception:
+            log.exception("ONVIF video-settings correction failed for deviceID=%s", device_id)
+        finally:
+            with _onvif_reply_lock:
+                _onvif_reply_waiting.discard(device_id)
+
+    threading.Thread(target=run, daemon=True, name=f"onvif-reply-{device_id}").start()
+
+
+def _start_onvif_camera(ws, msg_id, payload):
+    """Start/stop an ONVIF camera away from the WS reader and send its reply."""
+    device_id = payload.get("deviceID")
+    url = payload.get("streamUrl")
+    reply_status = "stopped"
+    with _onvif_start_lock(device_id):
+        if device_id and payload.get("streaming") and url:
+            try:
+                with _reset_lock:
+                    _reset_pending.pop(device_id, None)
+                _stream_restart_count.pop(device_id, None)
+                try:
+                    _start_stream(device_id, None, None, None, payload.get("width"),
+                                  payload.get("height"), url=url)
+                finally:
+                    # After the probe: a transcode encodes at this size and Protect is told it,
+                    # so the camera's real size beats the announced one. Detection failing to
+                    # start must not cost the camera its video.
+                    width, height = _onvif_main_size(device_id, payload)
+                    _onvif.set_source(device_id, url, audio=payload.get("audio", True),
+                                      width=width, height=height, fps=payload.get("fps"))
+                _start_motion_detector(ws, device_id, preserve_tracks=True)
+                # Counted, health-watched and stall-checked like a UiStreamControl camera.
+                points = _stream_points_for(payload.get("width"), payload.get("height"),
+                                            payload.get("fps"))
+                _stream_points[device_id] = points if points is not None else STREAM_POINT_TIERS[0][1]
+                _stream_started_at[device_id] = time.monotonic()
+                _start_status_watch()
+                reply_status = "started"
+            except Exception:
+                log.exception("failed to start ONVIF camera deviceID=%s", device_id)
+        elif device_id:
+            _onvif.stop_device(device_id)
+            with _reset_lock:
+                _reset_pending.pop(device_id, None)
+            _stream_points.pop(device_id, None)
+            _stop_motion_detector(device_id, ws=ws)
+            _stop_stream(device_id)
+    send_msg(ws, "OnvifStreamControl", {"status": reply_status, "usedPoints": _used_points()},
+             in_response_to=msg_id)
+    if device_id and reply_status == "started":
+        _send_status_event(ws, device_id, plug=True, streaming=True,
+                           smart_ready=True, audio_ready=AUDIO_EVENT_READY)
+        _send_feature_flags_event(ws, device_id)
+
+
 def _stop_one_stream(device_id, preserve_tracks=True, ws=None):
     _stream_points.pop(device_id, None)
     # Stop inference first so its leaves go out before the snapshot file is removed.
@@ -4561,51 +4681,10 @@ def handle_function(ws, msg, device_info):
                 _send_feature_flags_event(ws, device_id)
         return
     if fn == "OnvifStreamControl":
-        # Assigning an ONVIF camera: we pull its RTSP for detection and push its
-        # video to Protect (channels arrive via ChangeVideoSettings with this deviceID).
-        device_id = payload.get("deviceID")
-        url = payload.get("streamUrl")
-        reply_status = "stopped"
-        if device_id and payload.get("streaming") and url:
-            try:
-                with _reset_lock:
-                    _reset_pending.pop(device_id, None)
-                _stream_restart_count.pop(device_id, None)
-                try:
-                    _start_stream(device_id, None, None, None, payload.get("width"),
-                                  payload.get("height"), url=url)
-                finally:
-                    # After the probe: a transcode encodes at this size and Protect is told it,
-                    # so the camera's real size beats the announced one. Detection failing to
-                    # start must not cost the camera its video.
-                    width, height = _onvif_main_size(device_id, payload)
-                    _onvif.set_source(device_id, url, audio=payload.get("audio", True),
-                                      width=width, height=height, fps=payload.get("fps"))
-                _start_motion_detector(ws, device_id, preserve_tracks=True)
-                # Counted, health-watched and stall-checked like a UiStreamControl camera.
-                points = _stream_points_for(payload.get("width"), payload.get("height"),
-                                            payload.get("fps"))
-                _stream_points[device_id] = points if points is not None else STREAM_POINT_TIERS[0][1]
-                _stream_started_at[device_id] = time.monotonic()
-                _start_status_watch()
-                reply_status = "started"
-            except Exception:
-                log.exception("failed to start ONVIF camera deviceID=%s", device_id)
-        elif device_id:
-            # Stop, don't forget: Protect often re-issues only streaming:true
-            # (not ChangeVideoSettings), and the destinations are still valid.
-            _onvif.stop_device(device_id)
-            with _reset_lock:
-                _reset_pending.pop(device_id, None)
-            _stream_points.pop(device_id, None)
-            _stop_motion_detector(device_id, ws=ws)
-            _stop_stream(device_id)
-        send_msg(ws, "OnvifStreamControl", {"status": reply_status, "usedPoints": _used_points()},
-                 in_response_to=msg_id)
-        if device_id and reply_status == "started":
-            _send_status_event(ws, device_id, plug=True, streaming=True,
-                               smart_ready=True, audio_ready=AUDIO_EVENT_READY)
-            _send_feature_flags_event(ws, device_id)
+        # Assigning an ONVIF camera: pull its RTSP and push its video in a worker, so a
+        # slow probe or profile lookup does not block every other camera's WS message.
+        threading.Thread(target=_start_onvif_camera, args=(ws, msg_id, payload),
+                         daemon=True, name="onvif-start").start()
         return
     if fn == "GetStreamList":
         # Protect asks on every connect; a non-empty list makes it send ResetAIPortStreams
@@ -4647,44 +4726,16 @@ def handle_function(ws, msg, device_info):
     if fn == "ChangeVideoSettings":
         # With a deviceID this configures ONVIF channel pushes; either way the reply is also
         # a query (the controller builds its channel list from it), so `{}` blocks provisioning.
-        onvif_src = None
-        if payload.get("deviceID") and isinstance(payload.get("video"), dict):
-            _onvif.configure(payload["deviceID"], payload["video"])
-            onvif_src = _onvif.source(payload["deviceID"])
-            _onvif.wait_for_substream(payload["deviceID"])
-        if onvif_src:
-            # Channels carry the camera's main stream (video2/video3 its substream, if it
-            # has one), so report their real geometry -- the main one probed, since Protect
-            # echoes back whatever we answered before. A wrong size breaks the web
-            # player (it sizes its decoder from it).
-            probe = _stream_probe.get(payload["deviceID"]) or {}
-            channel = {"enabled": True,
-                       "width": probe.get("width") or onvif_src["width"] or 1920,
-                       "height": probe.get("height") or onvif_src["height"] or 1080,
-                       "fps": probe.get("fps") or onvif_src["fps"] or 15,
-                       "bitrate": 8000000}
-            sub = _onvif.substream(payload["deviceID"])
-            sub_channel = {"enabled": True, "width": sub["width"], "height": sub["height"],
-                           "fps": sub["fps"] or channel["fps"], "bitrate": 1000000} if sub else None
-            video = {k: dict(sub_channel if sub and k in onvif_push.SUB_CHANNELS else channel)
-                     for k in payload["video"]}
-            encoded = _onvif.transcode_channels(payload["deviceID"]) or {}
-            for k in video:
-                video[k].update(encoded.get(k) or {})
-            send_msg(ws, "ChangeVideoSettings", {
-                "video": video,
-                "audio": {"enabled": not _reports_audio_off(payload["deviceID"]), "volume": 100},
-            }, in_response_to=msg_id)
-            return
-        send_msg(ws, "ChangeVideoSettings", {
-            "video": {
-                "video1": {"enabled": True, "width": 1920, "height": 1080,
-                           "fps": 25, "bitrate": 4000000},
-                "video2": {"enabled": False},
-                "video3": {"enabled": False},
-            },
-            "audio": {"enabled": False, "volume": 100},
-        }, in_response_to=msg_id)
+        device_id = payload.get("deviceID")
+        if device_id and isinstance(payload.get("video"), dict):
+            _onvif.configure(device_id, payload["video"])
+            src = _onvif.source(device_id)
+            if src:
+                first_sub = _onvif_video_settings(ws, msg_id, payload, src)
+                if _onvif.substream_pending(device_id):
+                    _correct_onvif_video_settings(device_id, ws, msg_id, payload, first_sub)
+                return
+        _onvif_video_settings(ws, msg_id, payload)  # generic fallback or no source yet
         return
     if fn == "ChangeIspSettings":
         # Same query-not-push pattern as ChangeVideoSettings; minimal best-effort shape.

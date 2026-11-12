@@ -108,6 +108,10 @@ class TestRemotePush(unittest.TestCase):
         self.push.restart_source("re-send")
         self.worker.send.assert_called_once_with(
             {"op": "restart_source", "channel": "video1", "reason": "re-send"})
+        self.push.reconnect("re-send")
+        self.assertEqual(self.worker.send.call_args,
+                         mock.call({"op": "reconnect", "channel": "video1",
+                                    "reason": "re-send"}))
         self.push.stop()
         self.worker.remove.assert_called_once_with(self.push)
 
@@ -147,6 +151,12 @@ class TestProcessCommands(unittest.TestCase):
         self.p.handle({"op": "restart_source", "channel": "video1", "reason": "re-send"})
         self.made[0].restart_source.assert_called_once_with("re-send")
         self.p.handle({"op": "restart_source", "channel": "video9"})    # none: ignored
+
+    def test_reconnect_reaches_the_push(self):
+        self._start()
+        self.p.handle({"op": "reconnect", "channel": "video1", "reason": "re-send"})
+        self.made[0].reconnect.assert_called_once_with("re-send")
+        self.p.handle({"op": "reconnect", "channel": "video9"})         # none: ignored
 
     def test_report_says_nothing_until_a_frame_is_sent(self):
         # A new push's last_sent is its creation: reporting that would make a replacement

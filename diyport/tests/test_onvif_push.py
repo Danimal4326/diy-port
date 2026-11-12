@@ -224,18 +224,33 @@ class TestPushManager(unittest.TestCase):
             self.m.set_source("CAM", "rtsp://cam/101")
             self.m.configure("CAM", _settings("video1", "S1"))
             self.m.configure("CAM", _settings("video1", "S1"))   # the repeat: reconnect
-            self.assertEqual(len(self.started), 2)
-            self.started[0].stop.assert_called_once()
+            self.assertEqual(len(self.started), 1)
+            self.started[0].stop.assert_not_called()
             self.started[0].restart_source.assert_called_once()
+            self.started[0].reconnect.assert_called_once()
             clock[0] += 5
             self.m.configure("CAM", _settings("video1", "S1"))   # within 10 s: kept
-            self.assertEqual(len(self.started), 2)
+            self.assertEqual(len(self.started), 1)
+            self.assertEqual(self.started[0].reconnect.call_count, 1)
             clock[0] += 5
             self.m.configure("CAM", _settings("video1", "S1"))   # 10 s on: reconnect
-            self.assertEqual(len(self.started), 3)
+            self.assertEqual(len(self.started), 1)
+            self.assertEqual(self.started[0].reconnect.call_count, 2)
             self.m.configure("CAM", _settings("video1", "S2"))   # a new name replaces it
-            self.assertEqual(len(self.started), 4)
-            self.started[2].stop.assert_called_once()
+            self.assertEqual(len(self.started), 2)
+            self.started[0].stop.assert_called_once()
+
+    def test_full_re_send_reconnects_without_replacing_pushes(self):
+        settings = {**_settings("video1", "S1"), **_settings("video2", "S2"),
+                    **_settings("video3", "S3")}
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.m.configure("CAM", settings)
+        first = list(self.started)
+        self.m.configure("CAM", settings)          # Protect re-sent every channel
+        self.assertEqual(self.started, first)      # no stop/recreate, so no pull teardown
+        for push in first:
+            push.stop.assert_not_called()
+            push.reconnect.assert_called_once()
 
     def test_channels_accumulate_and_dev_null_stops(self):
         self.m.set_source("CAM", "rtsp://cam/101")
@@ -337,13 +352,13 @@ class TestPushManager(unittest.TestCase):
         self.assertEqual(self.m.stalled_channels(30, now=150.0), {"CAM": ["video1", "video3"]})
 
     def test_a_re_send_does_not_make_a_silent_channel_look_healthy(self):
-        # Live 2026-11-03 17:24: Protect re-sent every ~13 s, and each re-send makes a new push.
+        # Live 2026-11-03 17:24: Protect re-sent every ~13 s, which must not reset a silent push.
         self.m.set_source("CAM", "rtsp://cam/101")
         self.m.configure("CAM", _settings("video1", "S1"))
         self.started[0].last_sent = 50.0
         self.m.configure("CAM", _settings("video1", "S1"))
-        self.assertEqual(self.started[1].last_sent, 50.0)
-        self.assertEqual(self.m._last_sent, {})
+        self.assertEqual(self.started[0].last_sent, 50.0)  # same push, no false health
+        self.assertEqual(self.m._last_sent, {("CAM", "video1"): 50.0})
 
     def test_stopping_forgets_what_a_re_send_kept(self):
         self.m._last_sent[("CAM", "video1")] = 50.0
@@ -689,7 +704,57 @@ class TestDetectServer(unittest.TestCase):
                                  for t in threading.enumerate()))
 
 
+class TestFullReSendPull(unittest.TestCase):
+    class FakeTranscode:
+        made = []
+
+        def __init__(self, url, audio, renditions):
+            self.source_url, self.camera_audio, self.renditions = url, audio, renditions
+            self.outputs = {ch: mock.Mock() for ch in onvif_push.TRANSCODE_CHANNELS}
+            for out in self.outputs.values():
+                out.transcode = self
+            self.stopped = 0
+            self.restarted = 0
+            self.made.append(self)
+
+        def start(self):
+            return self
+
+        def stop(self):
+            self.stopped += 1
+
+        def restart(self, reason):
+            self.restarted += 1
+
+    def test_full_re_send_keeps_one_transcode_pull(self):
+        self.FakeTranscode.made.clear()
+        settings = {**_settings("video1", "S1"), **_settings("video2", "S2"),
+                    **_settings("video3", "S3")}
+        with _modes("transcode"), \
+                mock.patch.object(onvif_push, "TranscodePull", self.FakeTranscode):
+            m = onvif_push.PushManager(fetch_profiles=lambda url: [], background=False)
+            m.set_source("CAM", "rtsp://cam/101", width=2560, height=1440, fps=20)
+            m.configure("CAM", settings)
+            self.assertEqual(len(self.FakeTranscode.made), 1)
+            owner = self.FakeTranscode.made[0]
+            m.configure("CAM", settings)          # Protect re-sent every channel
+            self.assertEqual(owner.stopped, 0)     # gst/DetectServer stay up
+            self.assertEqual(owner.restarted, 3)   # one re-send per channel
+            m.stop_all()
+            self.assertEqual(owner.stopped, 1)
+
+
 class TestPushReconnect(unittest.TestCase):
+    def test_reconnect_wakes_the_push_without_releasing_the_pull(self):
+        pull = mock.Mock()
+        push = onvif_push.FlvPush("CAM", "video1", "rtsp://cam/101", "S1",
+                                  "tcp://127.0.0.1:1", pool=mock.Mock())
+        push._pull = pull
+        push.reconnect("Protect re-sent its settings")
+        self.assertTrue(push._reconnect.is_set())
+        self.assertEqual(push._queue.get_nowait(), ("end", "Protect re-sent its settings"))
+        pull.unsubscribe.assert_not_called()
+
     def test_ending_a_push_sends_fin_to_protect(self):
         ours, protect = socket.socketpair()
         self.addCleanup(protect.close)

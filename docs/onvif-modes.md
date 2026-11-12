@@ -81,9 +81,9 @@ A sync every 1 s was worse; G3 sync was "very stable".
   size. A later reply corrects it.
 - Restarts drop the recording segment in progress on the main channel, so expect a gap of up to
   about 9 s in that channel's recording.
-- If Protect re-sends the settings for every configured channel at once, the shared pull is
-  stopped and recreated; with shared decode on, detection pauses for that moment. A partial
-  re-send keeps the pull (and detection) running.
+- If Protect re-sends the settings for every configured channel at once, each push opens a
+  fresh Protect connection in place; the shared gst pull and its DetectServer stay up, so
+  detection does not pause for the re-send.
 - `isolated` only contains failures one way: if `avclient.py` dies, the pushes stop too.
   With shared decode on, detection reads the pushed video1, so a restream process crash
   also pauses detection until its replacement starts.

@@ -83,6 +83,9 @@ class RemotePush:
     def restart_source(self, reason):
         self.worker.send({"op": "restart_source", "channel": self.channel, "reason": reason})
 
+    def reconnect(self, reason):
+        self.worker.send({"op": "reconnect", "channel": self.channel, "reason": reason})
+
     def command(self):
         return {"op": "start", "channel": self.channel, "url": self.source_url,
                 "name": self.stream_name, "dest": self.destination, "ffmpeg": self.ffmpeg_bin,
@@ -293,6 +296,11 @@ class Process:
                 entry = self.pushes.get(channel)
             if entry:
                 entry[0].restart_source(command.get("reason") or "asked to")
+        elif op == "reconnect":
+            with self.lock:
+                entry = self.pushes.get(channel)
+            if entry:
+                entry[0].reconnect(command.get("reason") or "asked to")
         else:
             log.warning("restream process for %s: unknown command %r", self.device_id, command)
 

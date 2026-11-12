@@ -1303,6 +1303,7 @@ class FlvPush:
         self._pull = None
         self._queue = queue.Queue(maxsize=self.QUEUE_TAGS)
         self._stop = threading.Event()
+        self._reconnect = threading.Event()
         self._sock = None
         self.last_sent = time.monotonic()  # last video frame written to Protect
         self._thread = threading.Thread(target=self._run, daemon=True,
@@ -1342,6 +1343,18 @@ class FlvPush:
         if isinstance(owner, TranscodePull):
             owner.restart(reason)
 
+    def reconnect(self, reason):
+        """Open a fresh Protect connection without releasing the shared pull."""
+        log.info("push %s/%s reconnecting: %s", self.device_id, self.channel, reason)
+        self._reconnect.set()
+        self.put(("end", reason))
+        sock = self._sock
+        if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
     def put(self, item):
         """From the pull: False (and the queue emptied) when this push fell behind."""
         try:
@@ -1368,11 +1381,23 @@ class FlvPush:
     def _run(self):
         attempt = failed = 0
         while not self._stop.is_set():
+            if self._reconnect.is_set():
+                self._reconnect.clear()
+                with self._queue.mutex:
+                    self._queue.queue.clear()
+                self._pull.resync(self)
+                continue
             item = self._get(1.0)
             if not item or item[0] != "start":
                 continue  # waiting for the pull to hand over a key frame
             attempt += 1
             failed = 0 if self._push_once(item, attempt) else failed + 1
+            if self._reconnect.is_set():
+                self._reconnect.clear()
+                with self._queue.mutex:
+                    self._queue.queue.clear()
+                self._pull.resync(self)
+                continue
             if self._stop.wait(retry_delay(self.retry_s, failed)):
                 break
             with self._queue.mutex:
@@ -1439,7 +1464,7 @@ class FlvPush:
                     pass
                 self._sock.close()
                 self._sock = None
-        if not self._stop.is_set():
+        if not self._stop.is_set() and not self._reconnect.is_set():
             log.warning("push %s/%s ended after %d bytes: %s", self.device_id, self.channel,
                         sent, reason)
         return sent > 0
@@ -1681,14 +1706,12 @@ class PushManager:
                 key = (device_id, channel)
                 if key in self._pushes and now - self._reconnected.get(key, -RECONNECT_MIN_S) \
                         >= RECONNECT_MIN_S:
-                    log.info("push %s/%s: Protect re-sent its settings, reconnecting",
-                             device_id, channel)
                     self._reconnected[key] = now
-                    push = self._pushes.pop(key)
+                    push = self._pushes[key]
                     push.restart_source("Protect re-sent its settings")
-                    push.stop()
-                    # Its replacement inherits this, or a channel Protect keeps re-sending
-                    # would look healthy however long it has delivered nothing.
+                    push.reconnect("Protect re-sent its settings")
+                    # Keep its last write, or a channel Protect keeps re-sending would
+                    # look healthy however long it has delivered nothing.
                     self._last_sent[key] = push.last_sent
             self._sync(device_id)
 

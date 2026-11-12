@@ -669,7 +669,9 @@ The ONVIF device service is tried on `http` port 80 and 8080, after a non-554
 port from the RTSP URL; `AIPORT_ONVIF_HTTP_PORT` and `AIPORT_ONVIF_SCHEME`
 (`http`/`https`) override that. `XAddr` and `GetStreamUri` must stay on the
 camera's host; `AIPORT_ONVIF_ALLOW_HOSTS` adds exceptions for cameras that
-answer with another interface address.
+answer with another interface address. Only plain `rtsp://` or `rtsps://` sources
+reach ffmpeg or gst-launch: `file:`, `concat:`, `http:` and URLs containing
+whitespace or `!` are rejected before a process starts.
 
 `OnvifStreamControl` names only the main profile. `onvif_media.py` asks the camera's
 ONVIF Media service (GetCapabilities, GetProfiles, GetStreamUri, WS-Security digest

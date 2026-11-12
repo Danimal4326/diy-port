@@ -728,6 +728,8 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
     ONVIF camera's own RTSP URL."""
     direct = bool(url)
     url = url or f"rtsp://{ip}:{port}/{uri}"
+    if direct:
+        onvif_push.validate_stream_url(url)
     source = (str(ip), str(port), str(uri), url, width, height)
     proc = _active_streams.get(device_id)
     if proc is not None and proc.poll() is None and _stream_source.get(device_id) == source:
@@ -761,6 +763,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
     jpeg_r, jpeg_w = os.pipe()
     cmd = [
         FFMPEG_BIN, "-loglevel", "warning", *(input_args or [
+            "-protocol_whitelist", "rtsp,tcp,udp,rtp,tls",
             "-rtsp_transport", "tcp", *_rtsp_timeout_args(),
             # Low-latency decode (no B-frame reorder delay). Not "-fflags nobuffer": with this
             # split/fps pipeline it left the rawvideo detection output empty (ffmpeg 8).

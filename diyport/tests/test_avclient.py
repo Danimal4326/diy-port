@@ -73,6 +73,12 @@ class TestSharedStamp(unittest.TestCase):
                          (1_700_000_000_000, 12_345))
 
 
+class TestDirectStreamURL(unittest.TestCase):
+    def test_refuses_a_non_rtsp_direct_url(self):
+        with self.assertRaises(ValueError):
+            av._start_stream("D", None, None, None, url="file:///etc/passwd")
+
+
 class TestGeometry(unittest.TestCase):
     def test_point_in_polygon(self):
         self.assertTrue(av._point_in_polygon(5, 5, SQUARE))

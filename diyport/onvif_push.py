@@ -423,6 +423,28 @@ def parse_destination(dest):
     return parts.hostname, parts.port, retry, timeout
 
 
+_BAD_URL_CHARS = set(' \t\r\n!"\\')
+
+
+def validate_stream_url(url):
+    """Only a normal RTSP(S) URL may reach ffmpeg or gst-launch."""
+    if not isinstance(url, str) or not url or any(c in _BAD_URL_CHARS for c in url) \
+            or any(ord(c) < 32 for c in url):
+        raise ValueError("stream URL is not a plain RTSP URL")
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError(f"bad stream URL: {exc}") from exc
+    if parts.scheme.lower() not in ("rtsp", "rtsps") or not parts.hostname:
+        raise ValueError("stream URL must be rtsp:// or rtsps://")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("stream URL has an invalid port")
+    if parts.fragment:
+        raise ValueError("stream URL must not have a fragment")
+    return url
+
+
 def ffmpeg_push_cmd(ffmpeg_bin, source_url, stream_name, camera_audio=True, copy_audio=True):
     """Camera video copied (no re-encode) plus an audio track into FLV on stdout.
     Protect's ingest only marks a stream ready (live view, recording) with both
@@ -433,10 +455,12 @@ def ffmpeg_push_cmd(ffmpeg_bin, source_url, stream_name, camera_audio=True, copy
     unifi-cam-proxy runs here with -c:a copy. Re-encoding G.711 to AAC made
     Protect's live view stop and start every second (live 2026-10-28);
     `copy_audio=False` re-encodes, for audio FLV can't hold (e.g. Opus)."""
+    validate_stream_url(source_url)
     cmd = [
         ffmpeg_bin, "-nostdin", "-loglevel", "error",
         "-avoid_negative_ts", "make_zero", "-fflags", "+genpts+discardcorrupt",
         "-use_wallclock_as_timestamps", "1", "-timeout", "15000000",
+        "-protocol_whitelist", "rtsp,tcp,udp,rtp,tls",
         "-rtsp_transport", "tcp", "-i", source_url,
     ]
     aac = ["-c:a", "aac", "-ar", "32000", "-ac", "1", "-b:a", "32k"]
@@ -469,6 +493,7 @@ def transcode_cmd(gst_bin, source_url, outputs, camera_audio=True, audio="pcmu",
     one encoder + flvmux per output, each written to its own fd. outputs is
     [(fd, width, height, fps, kbps, gop)]; a None size or fps keeps the camera's. The audio
     (copied, or silent AAC) is teed to every mux."""
+    validate_stream_url(source_url)
     cmd = [gst_bin, "-q",
            "rtspsrc", f"location={source_url}", "protocols=tcp", f"latency={int(latency_ms)}",
            "tcp-timeout=5000000", "teardown-timeout=2000000000", "name=src",

@@ -119,6 +119,30 @@ class TestRewrite(unittest.TestCase):
         self.assertTrue(out.startswith(b"FLV"))
 
 
+class TestStreamURL(unittest.TestCase):
+    def test_accepts_rtsp_and_rtsps(self):
+        for url in ("rtsp://cam/1", "rtsps://user:p%40ss@cam:8554/a?x=1"):
+            self.assertEqual(onvif_push.validate_stream_url(url), url)
+
+    def test_rejects_non_rtsp_and_shell_metacharacters(self):
+        for bad in ("file:///etc/passwd", "concat:/etc/passwd", "http://cam/1",
+                    "rtsp://cam/a b", "rtsp://cam/a!filesink", 'rtsp://cam/a"b',
+                    "rtsp://cam/a\\b", "rtsp:///x", "rtsp://cam:99999/x",
+                    "rtsp://cam/x#fragment"):
+            with self.assertRaises(ValueError, msg=bad):
+                onvif_push.validate_stream_url(bad)
+
+    def test_ffmpeg_gets_a_protocol_whitelist(self):
+        cmd = onvif_push.ffmpeg_push_cmd("ffmpeg", "rtsp://cam/1", "S")
+        at = cmd.index("-protocol_whitelist")
+        self.assertEqual(cmd[at + 1], "rtsp,tcp,udp,rtp,tls")
+        self.assertLess(at, cmd.index("-i"))
+
+    def test_transcode_rejects_a_non_rtsp_source(self):
+        with self.assertRaises(ValueError):
+            onvif_push.transcode_cmd("gst", "file:///etc/passwd", [])
+
+
 class TestDestination(unittest.TestCase):
     def test_parse(self):
         self.assertEqual(onvif_push.parse_destination(

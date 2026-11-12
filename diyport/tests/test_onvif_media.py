@@ -2,9 +2,14 @@
 # Copyright (C) 2026 The DIY-Port project
 """Unit tests for onvif_media.py: profile parsing, substream choice, and the SOAP
 calls (against canned responses shaped like a Hikvision camera's)."""
+import http.server
 import os
 import sys
+import threading
 import unittest
+import urllib.error
+import xml.etree.ElementTree as ET
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
@@ -49,6 +54,11 @@ def _uri(channel, token):
 
 
 MAIN = "rtsp://admin:p%40ss@192.0.2.10/Streaming/Channels/101?profile=Profile_1"
+MAIN_PORT = "rtsp://admin:p%40ss@192.0.2.10:10554/Streaming/Channels/101"
+CAPS_OFFHOST = _ENV.format(
+    '<tds:GetCapabilitiesResponse><tds:Capabilities><tt:Media>'
+    '<tt:XAddr>http://198.51.100.9/onvif/Media</tt:XAddr></tt:Media>'
+    '</tds:Capabilities></tds:GetCapabilitiesResponse>')
 
 
 class TestParse(unittest.TestCase):
@@ -126,9 +136,120 @@ class TestFetch(unittest.TestCase):
                 raise OSError("no device service")
             return PROFILES if b"GetProfiles" in body else _uri(102, "Profile_2")
 
-        profiles = onvif_media.fetch_profiles("rtsp://cam.local/101", post=post)
+        profiles = onvif_media.fetch_profiles("rtsp://192.0.2.10/101", post=post)
         self.assertEqual(len(profiles), 2)
-        self.assertEqual(calls[1], "http://cam.local/onvif/Media")
+        self.assertEqual(calls[-1], "http://192.0.2.10/onvif/Media")
+
+    def test_nonstandard_rtsp_port_is_tried_for_the_device_service(self):
+        calls = []
+
+        def post(url, body):
+            calls.append(url)
+            if b"GetCapabilities" in body:
+                return CAPS
+            return PROFILES if b"GetProfiles" in body else _uri(101, "Profile_1")
+
+        onvif_media.fetch_profiles(MAIN_PORT, post=post)
+        self.assertEqual(calls[0], "http://192.0.2.10:10554/onvif/device_service")
+
+    def test_offhost_xaddr_is_ignored(self):
+        calls = []
+
+        def post(url, body):
+            calls.append(url)
+            if b"GetCapabilities" in body:
+                return CAPS_OFFHOST
+            return PROFILES if b"GetProfiles" in body else _uri(101, "Profile_1")
+
+        onvif_media.fetch_profiles(MAIN, post=post)
+        self.assertEqual(calls[1], "http://192.0.2.10/onvif/Media")
+        self.assertNotIn("198.51.100.9", "\n".join(calls))
+
+    def test_allowed_host_override_permits_another_camera_address(self):
+        calls = []
+
+        def post(url, body):
+            calls.append(url)
+            if b"GetCapabilities" in body:
+                return CAPS_OFFHOST
+            return PROFILES if b"GetProfiles" in body else _uri(101, "Profile_1")
+
+        with mock.patch.dict(os.environ, {"AIPORT_ONVIF_ALLOW_HOSTS": "198.51.100.9"}):
+            onvif_media.fetch_profiles(MAIN, post=post)
+        self.assertIn("http://198.51.100.9/onvif/Media", calls)
+
+    def test_offhost_stream_uri_is_ignored(self):
+        def post(url, body):
+            if b"GetCapabilities" in body:
+                return CAPS
+            if b"GetProfiles" in body:
+                return PROFILES
+            return _ENV.format('<trt:GetStreamUriResponse><trt:MediaUri><tt:Uri>'
+                               'rtsp://198.51.100.9:554/stream</tt:Uri></trt:MediaUri>'
+                               '</trt:GetStreamUriResponse>')
+
+        profiles = onvif_media.fetch_profiles(MAIN, post=post)
+        self.assertIsNone(profiles[0]["url"])
+
+    def test_camera_supplied_login_is_replaced(self):
+        def post(url, body):
+            if b"GetCapabilities" in body:
+                return CAPS
+            if b"GetProfiles" in body:
+                return PROFILES
+            return _ENV.format('<trt:GetStreamUriResponse><trt:MediaUri><tt:Uri>'
+                               'rtsp://camuser:campass@192.0.2.10/stream</tt:Uri>'
+                               '</trt:MediaUri></trt:GetStreamUriResponse>')
+
+        profile = onvif_media.fetch_profiles(MAIN, post=post)[0]
+        self.assertTrue(profile["url"].startswith("rtsp://admin:p%40ss@192.0.2.10/"))
+        self.assertNotIn("camuser", profile["url"])
+
+    def test_malformed_xml_is_rejected(self):
+        with self.assertRaises(ET.ParseError):
+            onvif_media.fetch_profiles(MAIN, post=lambda url, body: b"not xml")
+
+    def test_redirect_is_refused(self):
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(302)
+                self.send_header("Location", "http://198.51.100.9/steal")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with mock.patch.object(onvif_media, "ONVIF_HTTP_PORT", server.server_address[1]), \
+                mock.patch.object(onvif_media, "ONVIF_SCHEME", "http"):
+            with self.assertRaises(urllib.error.URLError):
+                onvif_media.fetch_profiles("rtsp://127.0.0.1/101", timeout=1)
+
+    def test_large_soap_response_is_rejected(self):
+        class Large(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = b"x" * (onvif_media.MAX_SOAP_BYTES + 1)
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Large)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with mock.patch.object(onvif_media, "ONVIF_HTTP_PORT", server.server_address[1]), \
+                mock.patch.object(onvif_media, "ONVIF_SCHEME", "http"):
+            with self.assertRaises(ValueError):
+                onvif_media.fetch_profiles("rtsp://127.0.0.1/101", timeout=1)
 
     def test_no_login_without_userinfo(self):
         self.assertNotIn("Security", onvif_media._envelope("<x/>", "", ""))

@@ -665,6 +665,12 @@ RTSP URL, `streaming` true/false) and, per channel, `ChangeVideoSettings` with a
 `extendedFlv` `avSerializer`: a `streamName` and `tcp://<console>:7550` as destination.
 Protect's own ingest for that camera stops; without the push the camera has no video.
 
+The ONVIF device service is tried on `http` port 80 and 8080, after a non-554
+port from the RTSP URL; `AIPORT_ONVIF_HTTP_PORT` and `AIPORT_ONVIF_SCHEME`
+(`http`/`https`) override that. `XAddr` and `GetStreamUri` must stay on the
+camera's host; `AIPORT_ONVIF_ALLOW_HOSTS` adds exceptions for cameras that
+answer with another interface address.
+
 `OnvifStreamControl` names only the main profile. `onvif_media.py` asks the camera's
 ONVIF Media service (GetCapabilities, GetProfiles, GetStreamUri, WS-Security digest
 with the RTSP URL's login) for the rest, once per URL, and `video2`/`video3` carry the

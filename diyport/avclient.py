@@ -829,9 +829,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
                 if shared:
                     try:  # the wall time Protect places this frame at
                         wall = walls.popleft()
-                        # Protect's wall time places the box; local read time is what
-                        # health/stall checks compare with time.monotonic().
-                        stamp = (int(wall), stamp[1])
+                        stamp = _shared_stamp(stamp, wall)
                     except IndexError:
                         log.warning("shared decode for deviceID=%s: frame without a time",
                                     device_id)
@@ -2317,6 +2315,19 @@ def _person_moving(tracks, face):
     return person is not None and not person.get("stationary_coord")
 
 
+def _parent_moving(tracks, tr):
+    """Whether the parent that owns this face/plate is confirmed and moving. A face uses
+    its own person_tid, not any moving person in the frame."""
+    if tr["objectType"] == "face":
+        parent = tracks.get(tr.get("person_tid"))
+        return (parent is not None and parent.get("confirmed", True)
+                and not parent.get("stationary_coord"))
+    kind = CONFIRM_WITH.get(tr["objectType"])
+    return kind is not None and any(
+        p["objectType"] == kind and p.get("confirmed", True)
+        and not p.get("stationary_coord") for p in tracks.values())
+
+
 def _event_face(dev, d, event):
     """(index in dev["recent"], tracker_id, track, "event") of the face track that closed
     in `event` nearest face detection d, or None."""
@@ -3232,9 +3243,8 @@ def _motion_tick(ws, device_id):
             parent = CONFIRM_WITH.get(tr["objectType"])
             if tr["objectType"] == "face" and not tr.get("nameable"):
                 continue
-            if parent and not tr.get("confirmed", True) and tr["miss_count"] == 0 and any(
-                    p["objectType"] == parent and p.get("confirmed", True)
-                    and not p.get("stationary_coord") for p in tracks.values()):
+            if parent and not tr.get("confirmed", True) and tr["miss_count"] == 0 \
+                    and _parent_moving(tracks, tr):
                 tr["confirmed"] = True
                 log.info("real motion tick: %s tracker_id=%s confirmed with its %s, joining for "
                          "deviceID=%s", tr["objectType"], tid, parent, device_id)
@@ -3291,6 +3301,10 @@ def _motion_tick(ws, device_id):
                     single()
                 for _, tr in active:  # still in view: quiet until it moves again
                     _park(tr)
+                # The event is closed; teardown must not re-leave it for already-parked tracks.
+                for tr in tracks.values():
+                    if tr.get("event_id") == event["id"]:
+                        tr.pop("event_id", None)
                 dev["event"] = None
             elif now_ms - dev.get("last_report_ms", now_ms - REPORT_INTERVAL_MS) >= REPORT_INTERVAL_MS:
                 # One batched update per report interval, only for tracks seen since the last
@@ -3332,7 +3346,13 @@ def _stop_motion_detector(device_id, preserve_tracks=False, ws=None):
     with _motion_lock:
         dev = _motion_state.get(device_id)
         open_tracks = list((dev or {}).get("tracks", {}).items())
+        # Participants that already parked are in the event's finished list, not tracks.
+        finished = list(((dev or {}).get("event") or {}).get("finished", []))
         _motion_state.pop(device_id, None)
+    members = {tid: tr for tid, tr in open_tracks}
+    for tid, tr in finished:
+        members.setdefault(tid, tr)
+    open_tracks = list(members.items())
     if not open_tracks:
         return
     if ws is None:
@@ -3869,6 +3889,12 @@ def _box_delay_ms(device_id):
 def _now_ms():
     """(wall ms, monotonic ms) right now."""
     return int(time.time() * 1000), int(time.monotonic() * 1000)
+
+
+def _shared_stamp(stamp, wall):
+    """A shared-decode frame: Protect's wall time for the box, local read time for health
+    and stall checks (never derive the monotonic half from a foreign clock)."""
+    return int(wall), stamp[1]
 
 
 # deviceID -> (wall ms, monotonic ms) a back-filled message describes (_at_frame).

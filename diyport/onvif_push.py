@@ -50,33 +50,8 @@ log = logging.getLogger("aiport-onvif")
 # the app pull full resolution.
 SUB_CHANNELS = ("video2", "video3")
 
-# An ONVIF camera's video runs one of three ways, set by AIPORT_ONVIF_MODE: a default, then any
-# per-camera exceptions, as `isolated,AABBCCDDEEFF=copy`, so cameras can move one at a time.
-#   copy (the default)  below's "copy"; pushes run in avclient. Works anywhere.
-#   transcode           below's "option C"; pushes run in avclient.
-#   isolated            option C, with pushes in a process per camera (onvif_restream.py).
-#
-# copy: ffmpeg pulls the camera's main stream and substream and copies them.
-#
-# Option C: what the AI Port itself does with an ONVIF camera. Its ubnt_av_aiport
-# (v5.1.12, Ghidra) pulls the main stream once with rtspsrc protocols=tcp latency=500
-# tcp-timeout=5000000, decodes it once (v4l2dec) and re-encodes one stream per channel (S0
-# with a 1 s GOP, S1 GOP 24 at 2 Mbps, S2 at 300 kbps), so every channel Protect plays was
-# made by its own encoder at a steady rate. Here one gst-launch does the same with
-# VideoToolbox (vtdec, one vtenc_h264 per channel), each channel on its own pipe: one RTSP
-# session per camera instead of main + substream. video2 is encoded at the substream's size
-# and video3 at TRANSCODE_VIDEO3_HEIGHT, as Protect is told (ChangeVideoSettings). macOS
-# only; needs `brew install gstreamer` (1.28.8 tested). Live 2026-11-03/04 on Driveway: the
-# user found it more stable than ffmpeg or a copied GStreamer pull, with a better picture,
-# and it held 20 fps for 10 h 48 min.
-#
-# It also sends clock syncs as yi-protect's FlvPush does, "matching a real G3": onMpma +
-# onClockSync at connection start (after onMetaData, before the codec configs), then
-# onClockSync + onMpma before every key frame, 10 s fallback. Live 02:22 on Driveway
-# (2026-11-03): Protect plays this camera through an fMP4 player with useWallClock=1
-# (unifi-cam-proxy's Driveway gets a UBNT one), and with a sync every 5 s a cold start played
-# ~1 s then paused ~5 s, as if waiting for the next sync to place frames on the wall clock.
-# A sync every 1 s was worse; G3 sync was "very stable".
+# AIPORT_ONVIF_MODE: copy, transcode or isolated (per-camera exceptions allowed). See
+# docs/onvif-modes.md for the pipelines, G3 clock syncs and the live measurements.
 COPY, TRANSCODE, ISOLATED = "copy", "transcode", "isolated"
 _MODE_NAMES = (COPY, TRANSCODE, ISOLATED)
 
@@ -627,6 +602,7 @@ class SharedPull:
         self._proc = None
         self._codec_error_logged = None
         self._copy_audio = True  # until ffmpeg says FLV can't hold the camera's audio
+        self._audio_frames = 0   # per attempt: a camera/substream with no audio falls back
         self._last_video = None  # monotonic s of the last video frame of this pull
         self.protect_clock = None  # TRANSCODE video1 with shared decode: a ProtectClock
         self._thread = threading.Thread(target=self._run, daemon=True,
@@ -673,6 +649,7 @@ class SharedPull:
         proc = None
         stderr_tail = lambda: ""
         self._frames = 0
+        self._audio_frames = 0
         self._last_video = None
         codec_error = None
         try:
@@ -707,6 +684,16 @@ class SharedPull:
                 proc.stdout.close()
             self._end_sinks()
         frames = self._frames
+        if not self._stop.is_set() and self.camera_audio:
+            stderr = stderr_tail()[-500:]
+            if frames > 0 and not self._audio_frames:
+                self.camera_audio = False
+                log.info("pull %s has no audio track: using silent AAC", _describe(self.source_url))
+                return False
+            if frames == 0 and "matches no streams" in stderr:
+                self.camera_audio = False
+                log.info("pull %s has no audio track: using silent AAC", _describe(self.source_url))
+                return False
         if not self._stop.is_set():
             stderr = stderr_tail()[-300:]
             msg = ("pull %s ended after %d frames: %s%s", _describe(self.source_url), frames,
@@ -752,6 +739,8 @@ class SharedPull:
                     (tag_header, body)
             else:
                 self._frames += 1
+                if tag_header[0] == _TAG_AUDIO:
+                    self._audio_frames += 1
                 if tag_header[0] == _TAG_VIDEO:
                     self._last_video = time.monotonic()
                     stats.frame(_tag_timestamp(tag_header))
@@ -807,9 +796,11 @@ def detect_socket(source_url):
     return os.path.join(directory, f"{digest}.sock")
 
 
-# How long detection waits for the video1 push to send a frame before it falls back to its own
-# clock reading (no push connected, or reconnecting).
+# How long detection waits for a video1 frame before using its own clock. After one timeout
+# the clock latches to its own reading, so a missing push cannot throttle detection.
 PROTECT_CLOCK_WAIT_S = 3.0
+PROTECT_CLOCK_STALL_S = 1.0
+PROTECT_CLOCK_RETRY_S = 10.0
 
 
 class ProtectClock:
@@ -828,24 +819,43 @@ class ProtectClock:
         with self._cond:
             self._syncs = collections.deque(maxlen=16)  # (stream ms, wall ms), oldest first
             self._written = None  # stream ms of the last video frame sent to Protect
+            self._last_write = None  # monotonic s of that write
+            # A new stream starts on our own clock until its first push write proves otherwise.
+            self._stalled_until = time.monotonic() + PROTECT_CLOCK_RETRY_S
+            self._cond.notify_all()
 
     def synced(self, stream_ms, wall_ms):
         with self._cond:
             self._syncs.append((stream_ms, wall_ms))
+            self._cond.notify_all()
 
     def wrote(self, stream_ms):
         with self._cond:
             self._written = stream_ms
+            self._last_write = time.monotonic()
+            self._stalled_until = 0.0
             self._cond.notify_all()
 
     def wall(self, stream_ms, timeout):
         """Protect's wall ms for the frame at stream_ms, once the push has sent it, by the
-        sync in force when it went (the latest at or before it); None after `timeout` s."""
-        deadline = time.monotonic() + timeout
+        sync in force when it went (the latest at or before it); None after `timeout` s or
+        immediately while a stalled/absent push has latched the fallback."""
+        now = time.monotonic()
         with self._cond:
+            if now < self._stalled_until:
+                return None
+            if self._written is not None and self._written < stream_ms \
+                    and self._last_write is not None \
+                    and now - self._last_write >= PROTECT_CLOCK_STALL_S:
+                self._stalled_until = now + PROTECT_CLOCK_RETRY_S
+                return None
+            deadline = now + timeout
             while self._written is None or self._written < stream_ms:
+                if time.monotonic() < self._stalled_until:  # reset by another thread
+                    return None
                 left = deadline - time.monotonic()
                 if left <= 0:
+                    self._stalled_until = time.monotonic() + PROTECT_CLOCK_RETRY_S
                     return None
                 self._cond.wait(left)
             sync = next((s for s in reversed(self._syncs) if s[0] <= stream_ms), None)
@@ -861,8 +871,9 @@ class DetectClient:
 
     LAG_LOG_S = 60.0
 
-    def __init__(self, conn, pull):
+    def __init__(self, conn, pull, on_close=None):
         self.conn, self.pull = conn, pull
+        self._on_close = on_close
         clock = getattr(pull, "protect_clock", None)
         self.clock = clock if isinstance(clock, ProtectClock) else None
         self._queue = queue.Queue(DETECT_QUEUE)
@@ -874,6 +885,19 @@ class DetectClient:
         self._lag_logged = time.monotonic()
         pull.subscribe(self)
         threading.Thread(target=self._run, daemon=True, name="detect-client").start()
+
+    def close(self):
+        """Stop this reader even when it is waiting for a frame (server shutdown)."""
+        self.dead = True
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass
+        try:
+            self.conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.conn.close()
 
     def _record(self, kind, data, wall=0.0):
         self._queue.put_nowait(DETECT_RECORD.pack(kind, wall, len(data)) + data)
@@ -957,6 +981,8 @@ class DetectClient:
             self.dead = True
             self.pull.unsubscribe(self)
             self.conn.close()
+            if self._on_close:
+                self._on_close(self)
 
 
 class DetectServer:
@@ -973,6 +999,8 @@ class DetectServer:
         self._sock.listen(2)
         self._sock.settimeout(1.0)  # so close() can wake _accept
         self._stop = threading.Event()
+        self._clients = set()
+        self._clients_lock = threading.Lock()
         threading.Thread(target=self._accept, daemon=True, name="detect-accept").start()
 
     def _accept(self):
@@ -984,10 +1012,20 @@ class DetectServer:
             except OSError:
                 return
             conn.settimeout(None)  # accept() inherited the listener's 1 s timeout
-            DetectClient(conn, self.pull)
+            client = DetectClient(conn, self.pull, on_close=self._forget)
+            with self._clients_lock:
+                self._clients.add(client)
+
+    def _forget(self, client):
+        with self._clients_lock:
+            self._clients.discard(client)
 
     def close(self):
         self._stop.set()
+        with self._clients_lock:
+            clients, self._clients = list(self._clients), set()
+        for client in clients:
+            client.close()
         self._sock.close()
         try:
             os.unlink(self.path)
@@ -1110,6 +1148,7 @@ class TranscodePull:
         ended = threading.Event()
         for out in self.outputs.values():
             out._frames = 0
+            out._audio_frames = 0
             out._last_video = None
             out.reason = "not started"
         try:
@@ -1131,6 +1170,8 @@ class TranscodePull:
             for r, w in pipes.values():
                 os.close(r)
                 os.close(w)
+            for out in self.outputs.values():
+                out._end_sinks()  # no reader was started to do it
             return False
         finally:
             for r, w in pipes.values():
@@ -1164,6 +1205,12 @@ class TranscodePull:
         for out in self.outputs.values():
             out._end_sinks()
         frames = sum(out._frames for out in self.outputs.values())
+        audio_frames = sum(out._audio_frames for out in self.outputs.values())
+        if self.camera_audio and frames > 0 and not audio_frames and not self._stop.is_set():
+            self.camera_audio = False
+            log.warning("transcode %s has no audio track: using silent AAC",
+                        _describe(self.source_url))
+            return False
         if self.camera_audio and frames == 0 and not self._stop.is_set():
             self._gst_audio = (self._gst_audio + 1) % len(GST_AUDIO)
         if not self._stop.is_set():
@@ -1236,9 +1283,10 @@ class FlvPush:
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name=f"push-{device_id}-{channel}")
 
-    def matches(self, source_url, stream_name, destination, renditions=None):
-        return (self.source_url, self.stream_name, self.destination, self.renditions) == \
+    def matches(self, source_url, stream_name, destination, renditions=None, camera_audio=None):
+        same = (self.source_url, self.stream_name, self.destination, self.renditions) == \
                (source_url, stream_name, destination, renditions)
+        return same and (camera_audio is None or bool(camera_audio) == bool(self.camera_audio))
 
     def start(self):
         self._pull = self._pool.acquire(self.source_url, self.camera_audio, self.channel,
@@ -1636,7 +1684,8 @@ class PushManager:
         rend = lambda channel: renditions if channel in TRANSCODE_CHANNELS else None
         for key in [k for k in self._pushes if k[0] == device_id]:
             want, url = wanted.get(key[1]), urls.get(key[1])
-            if not want or not url or not self._pushes[key].matches(url, *want, rend(key[1])):
+            if not want or not url or not self._pushes[key].matches(
+                    url, *want, rend(key[1]), src.get("audio", True)):
                 self._pushes.pop(key).stop()
         for channel, (name, dest) in wanted.items():
             url = urls[channel]

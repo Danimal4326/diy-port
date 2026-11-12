@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 The DIY-Port project
 """Unit and real-process tests for onvif_restream.py: a camera's video push in its own process."""
+import io
+import json
 import os
 import signal
 import socket
@@ -97,6 +99,8 @@ class TestRemotePush(unittest.TestCase):
         self.assertTrue(self.push.matches("rtsp://c", "S", DEST, self.renditions))
         self.assertFalse(self.push.matches("rtsp://c", "S2", DEST, self.renditions))
         self.assertFalse(self.push.matches("rtsp://c", "S", DEST))
+        self.assertTrue(self.push.matches("rtsp://c", "S", DEST, self.renditions, True))
+        self.assertFalse(self.push.matches("rtsp://c", "S", DEST, self.renditions, False))
 
     def test_forwards_to_its_worker(self):
         self.assertIs(self.push.start(), self.push)
@@ -159,6 +163,30 @@ class TestCommandLogging(unittest.TestCase):
                                     "url": "rtsp://admin:s3cr3t@192.0.2.10/1"})
         self.assertNotIn("s3cr3t", str(safe))
         self.assertIn("192.0.2.10/1", str(safe))
+
+
+class TestMainLogging(unittest.TestCase):
+    def test_the_main_loop_redacts_a_failed_command(self):
+        line = json.dumps({"op": "start", "channel": "video1",
+                           "url": "rtsp://admin:s3cr3t@192.0.2.10/1"}) + "\n"
+
+        class BrokenProcess:
+            def handle(self, command):
+                raise KeyError("name")
+            def report(self):
+                return {}
+            def stop_all(self):
+                pass
+
+        with mock.patch.object(rs, "_private_pipes",
+                               return_value=(io.StringIO(line), io.StringIO())), \
+                mock.patch.object(rs, "Process", return_value=BrokenProcess()), \
+                mock.patch("config.apply_logging"), \
+                self.assertLogs("aiport-onvif", "ERROR") as logs:
+            rs.main(["diyport-onvif", "CAM"])
+        output = "\n".join(logs.output)
+        self.assertNotIn("s3cr3t", output)
+        self.assertIn("192.0.2.10/1", output)
 
 
 class TestWorkerReports(unittest.TestCase):

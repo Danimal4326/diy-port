@@ -118,13 +118,17 @@ class TestFetch(unittest.TestCase):
         self.assertIn("#PasswordDigest", calls[0][1])
 
     def test_media_address_fallback(self):
+        calls = []
+
         def post(url, body):
+            calls.append(url)
             if b"GetCapabilities" in body:
                 raise OSError("no device service")
             return PROFILES if b"GetProfiles" in body else _uri(102, "Profile_2")
 
         profiles = onvif_media.fetch_profiles("rtsp://cam.local/101", post=post)
         self.assertEqual(len(profiles), 2)
+        self.assertEqual(calls[1], "http://cam.local/onvif/Media")
 
     def test_no_login_without_userinfo(self):
         self.assertNotIn("Security", onvif_media._envelope("<x/>", "", ""))

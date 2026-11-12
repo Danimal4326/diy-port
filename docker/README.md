@@ -28,9 +28,9 @@ There are two deployment shapes, for two different console locations:
 ```bash
 # from the repo root
 docker build -f docker/Dockerfile -t diyport-cpu .
-docker run --rm --network host --cap-add NET_ADMIN \
+docker run --rm --network host --cap-add NET_ADMIN --shm-size 256m \
     -v diyport-data:/data \
-    -e AIPORT_CONSOLE_HOST=<console-ip> diyport-cpu
+    -e AIPORT_CONSOLE_HOST=<console-ip> diyport-cpu --state-dir /data
 ```
 
 Or the Compose stack:

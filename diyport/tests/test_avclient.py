@@ -66,6 +66,13 @@ class Base(unittest.TestCase):
         self.addCleanup(lambda: setattr(av, "send_msg", self._orig_send))
 
 
+class TestSharedStamp(unittest.TestCase):
+    def test_protect_wall_does_not_move_the_local_monotonic_half(self):
+        local = (1_760_000_000_000, 12_345)
+        self.assertEqual(av._shared_stamp(local, 1_700_000_000_000.0),
+                         (1_700_000_000_000, 12_345))
+
+
 class TestGeometry(unittest.TestCase):
     def test_point_in_polygon(self):
         self.assertTrue(av._point_in_polygon(5, 5, SQUARE))
@@ -1439,6 +1446,22 @@ class TestCameraEvent(Base):
                       dict(other, coord=[940, 200, 150, 500]))
         event = av._motion_state["D"]["event"]
         self.assertFalse(old & {m[0] for m in event["finished"]})
+
+    def test_face_confirms_only_with_its_own_moving_person(self):
+        parked = {"objectType": "person", "confirmed": True, "stationary_coord": [0, 0, 1, 1]}
+        moving = {"objectType": "person", "confirmed": True}
+        face = {"objectType": "face", "person_tid": 1}
+        tracks = {1: parked, 2: moving}
+        self.assertFalse(av._parent_moving(tracks, face))
+        parked.pop("stationary_coord")
+        self.assertTrue(av._parent_moving(tracks, face))
+
+    def test_closed_event_clears_event_ids_from_parked_tracks(self):
+        for _ in range(av.STILL_TICKS + 3):
+            self.tick(self.PERSON, self.FACE)
+        dev = av._motion_state["D"]
+        self.assertIsNone(dev.get("event"))
+        self.assertFalse([tr for tr in dev["tracks"].values() if "event_id" in tr])
 
     def test_parked_face_rejoins_with_its_moving_person(self):
         from unittest import mock
@@ -3713,10 +3736,6 @@ class TestStopAllStreams(Base):
         self.assertEqual(calls, [("detector", "D", True, None)])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class EnrichFromFrameTest(unittest.TestCase):
     """Face reads from the analysed frame's JPEG; between reads a face follows its person."""
 
@@ -3744,3 +3763,7 @@ class EnrichFromFrameTest(unittest.TestCase):
         self.assertEqual(img.shape, (8, 8, 3))
         av._enrich_cache["CAM"] = (key, [])
         self.assertEqual(av._enrich_image("CAM", dets)[:2], (True, ("frame", 7)))
+
+
+if __name__ == "__main__":
+    unittest.main()

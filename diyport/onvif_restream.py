@@ -68,9 +68,10 @@ class RemotePush:
         self.renditions = renditions
         self.last_sent = time.monotonic()
 
-    def matches(self, source_url, stream_name, destination, renditions=None):
-        return (self.source_url, self.stream_name, self.destination, self.renditions) == \
+    def matches(self, source_url, stream_name, destination, renditions=None, camera_audio=None):
+        same = (self.source_url, self.stream_name, self.destination, self.renditions) == \
                (source_url, stream_name, destination, renditions)
+        return same and (camera_audio is None or bool(camera_audio) == bool(self.camera_audio))
 
     def start(self):
         self.worker.add(self)

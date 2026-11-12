@@ -122,8 +122,8 @@ class TestRewrite(unittest.TestCase):
 class TestDestination(unittest.TestCase):
     def test_parse(self):
         self.assertEqual(onvif_push.parse_destination(
-            "tcp://192.168.200.208:7550?retryInterval=1&connectTimeout=5"),
-            ("192.168.200.208", 7550, 1.0, 5.0))
+            "tcp://192.0.2.208:7550?retryInterval=1&connectTimeout=5"),
+            ("192.0.2.208", 7550, 1.0, 5.0))
 
     def test_rejects_other(self):
         for bad in ("file:///dev/null", "tcp://host", "udp://h:1"):
@@ -167,8 +167,9 @@ class TestPushManager(unittest.TestCase):
             push = mock.Mock()
             push.args = (device_id, channel, url, name, dest)
             push.renditions = renditions
-            push.matches.side_effect = lambda u, n, d, r=None: (u, n, d, r) == (
-                url, name, dest, renditions)
+            push.matches.side_effect = lambda u, n, d, r=None, a=None: (
+                (u, n, d, r) == (url, name, dest, renditions)
+                and (a is None or bool(a) == bool(camera_audio)))
             push.start.return_value = push
             self.started.append(push)
             return push
@@ -604,6 +605,81 @@ class TestG3Sync(unittest.TestCase):
                                  b"onClockSync", b"onMpma", _KEY])
 
 
+class TestProtectClock(unittest.TestCase):
+    def test_new_stream_uses_the_local_clock_until_a_write(self):
+        clock = onvif_push.ProtectClock()
+        started = time.monotonic()
+        self.assertIsNone(clock.wall(1000, 1.0))       # no per-frame timeout on startup
+        self.assertLess(time.monotonic() - started, 0.2)
+        clock.synced(0, 1000)
+        clock.wrote(2000)
+        self.assertEqual(clock.wall(1000, 0.1), 2000)  # sync at 0 = wall 1000
+
+    def test_a_silent_writer_latches_the_fallback(self):
+        clock = onvif_push.ProtectClock()
+        clock.synced(0, 1000)
+        clock.wrote(1000)
+        with clock._cond:
+            clock._last_write = time.monotonic() - 2.0
+        started = time.monotonic()
+        self.assertIsNone(clock.wall(2000, 1.0))
+        self.assertLess(time.monotonic() - started, 0.2)
+
+    def test_reset_wakes_a_waiting_frame(self):
+        clock = onvif_push.ProtectClock()
+        clock.synced(0, 1000)
+        clock.wrote(0)                                 # clear the startup latch
+        result = []
+        thread = threading.Thread(target=lambda: result.append(clock.wall(1000, 2.0)))
+        thread.start()
+        time.sleep(0.05)
+        clock.reset()
+        thread.join(0.5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [None])
+
+
+class TestDetectServer(unittest.TestCase):
+    def test_close_ends_the_client_and_the_accept_thread(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "detect.sock")
+            pull = mock.Mock(source_url="rtsp://cam/1")
+            server = onvif_push.DetectServer(path, pull)
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(client.close)
+            client.connect(path)
+            client.settimeout(2.0)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not any(
+                    t.name == "detect-client" and t.is_alive() for t in threading.enumerate()):
+                time.sleep(0.01)
+            server.close()
+            self.assertFalse(os.path.exists(path))
+            self.assertEqual(client.recv(16), b"")  # server closed the reader's connection
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and any(
+                    t.name == "detect-accept" and t.is_alive() for t in threading.enumerate()):
+                time.sleep(0.01)
+            self.assertFalse(any(t.name == "detect-accept" and t.is_alive()
+                                 for t in threading.enumerate()))
+
+
+class TestPushReconnect(unittest.TestCase):
+    def test_ending_a_push_sends_fin_to_protect(self):
+        ours, protect = socket.socketpair()
+        self.addCleanup(protect.close)
+        push = onvif_push.FlvPush("CAM", "video1", "rtsp://cam/101", "S1", "tcp://127.0.0.1:1",
+                                  pool=mock.Mock())
+        push.put(("end", "camera stream ended"))
+        header = b"FLV\x01\x05\x00\x00\x00\x09\x00\x00\x00\x00"
+        with mock.patch.object(onvif_push.socket, "create_connection", return_value=ours):
+            self.assertTrue(push._push_once(("start", header, [], 0), 1))
+        protect.settimeout(1.0)
+        self.assertEqual(protect.recv(64)[:3], b"FLV")
+        self.assertEqual(protect.recv(16), b"")  # FIN, not just close() with a drain thread
+
+
 class TestStreamName(unittest.TestCase):
     def test_replaced_and_tag_resized(self):
         tag = onvif_push._flv_tag(18, _meta("diyport"), 0)
@@ -791,6 +867,20 @@ class TestTranscode(unittest.TestCase):
         owner.restart.assert_called_once_with("re-send")
 
 
+class TestAudioTrackFallback(unittest.TestCase):
+    def test_video_without_audio_retries_with_silent_aac(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".flv", delete=False) as f:
+            f.write(_flv([(9, 0, _AVC_CONFIG), (9, 0, _KEY)]))
+        self.addCleanup(os.unlink, f.name)
+        cmd = [sys.executable, "-c",
+               "import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read())", f.name]
+        pull = onvif_push.SharedPull("rtsp://cam/101", camera_audio=True)
+        with mock.patch.object(onvif_push, "ffmpeg_push_cmd", lambda *a, **k: cmd):
+            self.assertFalse(pull._pull_once(1))
+        self.assertFalse(pull.camera_audio)
+
+
 class TestPullPool(unittest.TestCase):
     def test_one_pull_per_stream_until_last_user(self):
         with mock.patch.object(onvif_push, "SharedPull") as SharedPull:
@@ -899,6 +989,30 @@ class TestAudioCopyFallback(unittest.TestCase):
         self.assertEqual(launched, [True, True])
 
 
+class TestMalformedMetadata(unittest.TestCase):
+    def test_truncated_metadata_restarts_instead_of_killing_the_thread(self):
+        import tempfile
+        payload = b"\x02\x00\x0aonMetaData\x00\x05width\x00\x01"
+        with tempfile.NamedTemporaryFile(suffix=".flv", delete=False) as f:
+            f.write(_flv([(18, 0, payload)]))
+        self.addCleanup(os.unlink, f.name)
+        cmd = [sys.executable, "-c",
+               "import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read())", f.name]
+        pull = onvif_push.SharedPull("rtsp://cam/101")
+        with mock.patch.object(onvif_push, "ffmpeg_push_cmd", lambda *a, **k: cmd):
+            self.assertFalse(pull._pull_once(1))  # caught and retried, not raised
+
+
+class TestFlvPushMatches(unittest.TestCase):
+    def test_audio_flag_is_part_of_the_match(self):
+        push = onvif_push.FlvPush("CAM", "video1", "rtsp://cam/101", "S1",
+                                  "tcp://127.0.0.1:7550", camera_audio=True)
+        self.assertTrue(push.matches("rtsp://cam/101", "S1", "tcp://127.0.0.1:7550",
+                                     None, True))
+        self.assertFalse(push.matches("rtsp://cam/101", "S1", "tcp://127.0.0.1:7550",
+                                      None, False))
+
+
 class TestSharedPushes(unittest.TestCase):
     """Two channels on one stream: one ffmpeg, two connections, each under its
     own streamName and starting at t=0 on a key frame."""
@@ -939,7 +1053,9 @@ class TestSharedPushes(unittest.TestCase):
                 if not chunk:
                     break
                 data += chunk
-                first[name].set()
+                tags = _parse_extended(data)
+                if len(tags) >= 9 and tags[-1][1] == 1000 and tags[-1][2] == _KEY:
+                    first[name].set()  # the whole expected stream has arrived
             conn.close()
             received[name] = data
 
@@ -955,8 +1071,7 @@ class TestSharedPushes(unittest.TestCase):
             # Stop once both pushes have delivered, not after a fixed source lifetime:
             # the pull would otherwise retry and launch a second ffmpeg.
             for event in first.values():
-                self.assertTrue(event.wait(10), "a push delivered nothing")
-            time.sleep(0.3)  # let the first chunks drain before stopping
+                self.assertTrue(event.wait(10), "a push delivered no complete stream")
             for push in pushes:
                 push.stop()
             for t in threads:

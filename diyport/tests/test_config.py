@@ -135,7 +135,11 @@ class TestStreamDir(unittest.TestCase):
                          config.stream_dir(os.path.join(tmp, "instances/main")))
 
     def test_tmpfs_base_writable(self):
-        self.assertTrue(os.path.isdir(config._tmpfs_base()))
+        base = config._tmpfs_base()
+        self.assertTrue(os.path.isdir(base))
+        fd, probe = tempfile.mkstemp(dir=base)
+        os.close(fd)
+        os.unlink(probe)  # a read-only base would raise here, not just later
 
     def test_make_stream_dir_fixes_an_existing_parent(self):
         # An older version (or another user) may have made the shared parent 0755.
@@ -241,12 +245,12 @@ class TestFirmwarePin(unittest.TestCase):
 
 class TestRedact(unittest.TestCase):
     def test_rtsp_credentials(self):
-        line = ("payload={'streamUrl': 'rtsp://onvif:s3cret@192.168.1.22/Streaming/Channels/101"
+        line = ("payload={'streamUrl': 'rtsp://onvif:s3cret@192.0.2.22/Streaming/Channels/101"
                 "?transportmode=unicast', 'width': 3840}")
         out = config.redact(line)
         self.assertNotIn("s3cret", out)
         self.assertNotIn("onvif:", out)
-        self.assertIn("rtsp://<redacted>@192.168.1.22/Streaming/Channels/101", out)
+        self.assertIn("rtsp://<redacted>@192.0.2.22/Streaming/Channels/101", out)
 
     def test_password_and_token_fields(self):
         out = config.redact('body={"username": "ui", "password": "FAKEPASS", "token": "FAKE"}')
@@ -281,7 +285,7 @@ class TestRedact(unittest.TestCase):
             self.assertNotIn("p@ssw0rd", out)
 
     def test_leaves_ordinary_text(self):
-        for line in ("connecting to wss://192.168.1.2:7442/ with headers={'X-Ident': 'fc'}",
+        for line in ("connecting to wss://192.0.2.2:7442/ with headers={'X-Ident': 'fc'}",
                      "starting merged RTSP pull for deviceID=D: rtsp://10.0.0.1:7447/abc"):
             self.assertEqual(config.redact(line), line)
 

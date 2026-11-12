@@ -51,6 +51,7 @@ import apple_fm
 import enrich
 import hoststats
 import onvif_push
+import shared_decode
 import onvif_restream
 import regions
 from procutil import start_stderr_drain
@@ -717,64 +718,7 @@ def _shared_decode_source(device_id, url):
     if src.get("url") not in (None, url):
         return None
     fps = src.get("fps") or (_stream_probe.get(device_id) or {}).get("fps") or 20
-    return onvif_push.detect_socket(url), _shared_decode_keep(fps)
-
-
-def _shared_decode_keep(fps):
-    """(keep, of): analyse `keep` of every `of` pushed frames, spread evenly. A whole
-    stride (every Kth frame) can't hit DETECT_FPS from 15 fps: live 2026-11-07 on
-    92DE633106E8 (15 fps) round(15/10) = 2 gave 7.5 fps and a "falling behind" warning
-    every minute. Integers, so ffmpeg's select and the wall-time feeder agree exactly."""
-    of = max(1, int(round(float(fps))))
-    return min(DETECT_FPS, of), of
-
-
-def _shared_decode_keeps(n, keep):
-    """True for input frame n (from 0) that the shared decode analyses: the frames where
-    floor(n * keep / of) steps up (Bresenham), keep of every `of`, evenly spread."""
-    k, of = keep
-    return (n + 1) * k // of > n * k // of
-
-
-def _shared_decode_select(keep):
-    """The ffmpeg select filter for _shared_decode_keeps (n counts input frames from 0)."""
-    k, of = keep
-    return f"select=gt(floor((n+1)*{k}/{of})\\,floor(n*{k}/{of}))"
-
-
-def _feed_shared_decode(device_id, proc, sock_path, keep, walls):
-    """Copies the pushed video1 from its DetectServer into ffmpeg, queueing the wall time
-    of each video frame ffmpeg keeps (_shared_decode_keeps) for the frame reader. Our encoder never reorders frames
-    (allow-frame-reordering=false), so each video tag decodes to one picture, in order."""
-    import socket as socketlib
-    sock = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
-    frames = 0
-    try:
-        # The transcode (and its socket) starts after detection: wait for it.
-        for attempt in range(30):
-            try:
-                sock.connect(sock_path)
-                break
-            except (FileNotFoundError, ConnectionRefusedError):
-                if attempt == 29 or proc.poll() is not None:
-                    raise
-                time.sleep(0.5)
-        f = sock.makefile("rb", buffering=0)
-        for kind, wall, data in onvif_push.read_detect_records(f.read):
-            if kind == onvif_push.DETECT_FRAME:
-                if _shared_decode_keeps(frames, keep):
-                    walls.append(wall)
-                frames += 1
-            proc.stdin.write(data)
-    except (OSError, ValueError) as exc:
-        log.info("shared decode feed for deviceID=%s ended: %r", device_id, exc)
-    finally:
-        sock.close()
-        try:
-            proc.stdin.close()
-        except OSError:
-            pass
-    log.info("shared decode feed for deviceID=%s ended after %d frames", device_id, frames)
+    return onvif_push.detect_socket(url), shared_decode.keep_ratio(fps, DETECT_FPS)
 
 
 # One ffmpeg pulls RTSP and splits post-decode into a full-res JPEG and an RGB detection
@@ -803,10 +747,10 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
     det_w, det_h = _detect_dims(width, height)
     rate = input_args = None
     if shared:
-        # Frames picked by count (_shared_decode_keeps), not fps= by timestamp, so each
-        # output frame is a known input frame and takes its wall time (_feed_shared_decode).
+        # Frames picked by count (shared_decode.keeps), not fps= by timestamp, so each
+        # output frame is a known input frame and takes its wall time (shared_decode.feed).
         sock_path, keep = shared
-        codec, rate = "h264", _shared_decode_select(keep)
+        codec, rate = "h264", shared_decode.select_filter(keep)
     pre_args, graph, hw, jpeg_every = _pull_video_args(codec, det_w, det_h, device_id,
                                                        direct=direct, rate=rate)
     if shared:
@@ -839,7 +783,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
         os.close(jpeg_w)
     walls = collections.deque()  # shared decode: wall ms of each frame ffmpeg will output
     if shared:
-        threading.Thread(target=_feed_shared_decode, args=(device_id, proc, *shared, walls),
+        threading.Thread(target=shared_decode.feed, args=(device_id, proc, *shared, walls),
                          daemon=True, name=f"shared-decode-{device_id}").start()
     jpeg_pipe = os.fdopen(jpeg_r, "rb")
     stderr_tail = start_stderr_drain(proc)

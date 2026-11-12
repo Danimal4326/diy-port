@@ -2278,6 +2278,12 @@ def _resume_recent(dev, d, event):
     for i, (tid, tr, _closed_ms) in enumerate(dev.get("recent", ())):
         if tr["objectType"] != d["objectType"]:
             continue
+        if tr["objectType"] == "face" and tr.get("stationary_coord"):
+            # A parked face at the same spot is not the same person by geometry alone.
+            emb = ((d.get("scored") or {}).get("faceEmbed") or (None,))[0]
+            sim = _face_similarity(emb, (tr.get("extra") or {}).get("faceEmbed"))
+            if sim is None or sim < FACE_RESUME_MIN_SIM:
+                continue
         iou = max(_iou(tr["coord"], d["coord"]), _iou(tr.get("first_coord") or tr["coord"], d["coord"]))
         if iou < best_iou:
             continue

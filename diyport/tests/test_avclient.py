@@ -1453,6 +1453,21 @@ class TestCameraEvent(Base):
         event = av._motion_state["D"]["event"]
         self.assertFalse(old & {m[0] for m in event["finished"]})
 
+    def test_parked_face_needs_a_matching_embedding_to_resume(self):
+        track = {"objectType": "face", "coord": [100, 100, 20, 20],
+                 "stationary_coord": [100, 100, 20, 20],
+                 "extra": {"faceEmbed": [1.0, 0.0]}}
+        dev = {"recent": [(7, track, 0)]}
+        different = {"objectType": "face", "coord": [100, 100, 20, 20],
+                     "scored": {"faceEmbed": ([0.0, 1.0], 0.9)}}
+        self.assertIsNone(av._resume_recent(dev, different, None))
+        same = {"objectType": "face", "coord": [100, 100, 20, 20],
+                "scored": {"faceEmbed": ([1.0, 0.0], 0.9)}}
+        self.assertEqual(av._resume_recent(dev, same, None)[0], 7)
+        no_embedding = {"objectType": "face", "coord": [100, 100, 20, 20]}
+        dev = {"recent": [(7, track, 0)]}
+        self.assertIsNone(av._resume_recent(dev, no_embedding, None))
+
     def test_face_confirms_only_with_its_own_moving_person(self):
         parked = {"objectType": "person", "confirmed": True, "stationary_coord": [0, 0, 1, 1]}
         moving = {"objectType": "person", "confirmed": True}

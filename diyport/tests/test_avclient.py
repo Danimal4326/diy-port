@@ -1422,6 +1422,24 @@ class TestCameraEvent(Base):
         self.assertTrue(all(tracks[t].get("stationary_coord") for t in tracks
                             if tracks[t]["objectType"] == "person"))
 
+    def test_dropped_parked_face_leaves_the_open_event(self):
+        # Another person keeps the event open, so the dropped face must also leave its
+        # finished list or the eventual leave carries it a second time.
+        other = {"objectType": "person", "score": 0.8, "coord": [900, 200, 150, 500]}
+        for i in range(av.STILL_TICKS + 3):
+            self.tick(self.PERSON, self.FACE,
+                      dict(other, coord=[900 + i * 3, 200, 150, 500]))
+        tracks = av._motion_state["D"]["tracks"]
+        old = {tid for tid, tr in tracks.items() if tr["objectType"] == "face"}
+        self.assertTrue(old)
+        self.assertIsNotNone(av._motion_state["D"].get("event"))
+        with mock.patch.object(av, "_moved_since", lambda tr: tr["objectType"] == "face"), \
+                mock.patch.object(av, "_parked_spot_unchanged", return_value=False):
+            self.tick(self.PERSON, self.FACE,
+                      dict(other, coord=[940, 200, 150, 500]))
+        event = av._motion_state["D"]["event"]
+        self.assertFalse(old & {m[0] for m in event["finished"]})
+
     def test_parked_face_rejoins_with_its_moving_person(self):
         from unittest import mock
         for _ in range(av.STILL_TICKS + 3):
@@ -2928,7 +2946,7 @@ class TestOnvifChannelGeometry(unittest.TestCase):
 
     def _reply(self):
         dest = {"avSerializer": {"type": "extendedFlv", "parameters": {"streamName": "S"},
-                                 "destinations": ["tcp://10.0.0.1:7550"]}}
+                                 "destinations": ["tcp://192.0.2.1:7550"]}}
         ws = _FakeWS()
         av.handle_function(ws, {"functionName": "ChangeVideoSettings", "messageId": "m",
                                 "payload": {"deviceID": "CAMX", "video": {
@@ -2956,7 +2974,7 @@ class TestOnvifChannelGeometry(unittest.TestCase):
 
     def _reply_audio(self):
         dest = {"avSerializer": {"type": "extendedFlv", "parameters": {"streamName": "S"},
-                                 "destinations": ["tcp://10.0.0.1:7550"]}}
+                                 "destinations": ["tcp://192.0.2.1:7550"]}}
         ws = _FakeWS()
         av.handle_function(ws, {"functionName": "ChangeVideoSettings", "messageId": "m",
                                 "payload": {"deviceID": "CAMX", "video": {"video1": dest}}}, {})
@@ -3715,6 +3733,7 @@ class EnrichFromFrameTest(unittest.TestCase):
         gone = av._follow_parent(dict(face), [{"coord": [800, 800, 50, 50]}])
         self.assertEqual(gone["coord"], [110, 100, 20, 20])
 
+    @unittest.skipUnless(_CV2, "OpenCV not installed")
     def test_reads_frame_jpeg_then_reuses_within_interval(self):
         import cv2
         import numpy as np

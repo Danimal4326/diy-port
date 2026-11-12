@@ -829,7 +829,9 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
                 if shared:
                     try:  # the wall time Protect places this frame at
                         wall = walls.popleft()
-                        stamp = (int(wall), stamp[1] - (stamp[0] - int(wall)))
+                        # Protect's wall time places the box; local read time is what
+                        # health/stall checks compare with time.monotonic().
+                        stamp = (int(wall), stamp[1])
                     except IndexError:
                         log.warning("shared decode for deviceID=%s: frame without a time",
                                     device_id)
@@ -3039,6 +3041,9 @@ def _motion_tick(ws, device_id):
                                  "person isn't moving; the face at its spot is someone else's "
                                  "for deviceID=%s", tracker_id, device_id)
                         unclaimed.append(matches.pop(tracker_id))
+                        if event is not None:
+                            event["finished"] = [m for m in event["finished"]
+                                                 if m[0] != tracker_id]
                         del tracks[tracker_id]
                         continue
                     else:

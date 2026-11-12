@@ -1,0 +1,182 @@
+# Fork-only: publish the OpenVINO image to GitHub Container Registry.
+#
+# Lives only on the fork's `release` branch (main tracks upstream), which is the
+# fork's default branch: workflow_run only fires for workflows on the default branch.
+#
+# Rolling builds: after the CI workflow passes on a push to release (so a red
+# commit is never published), or by hand from the Actions tab. Pushes
+# ghcr.io/<owner>/diyport:openvino and :openvino-<short sha>; :latest is left alone.
+#
+# Releases: push a tag vMAJOR.MINOR.PATCH on a commit that already passed CI
+# (i.e. one pushed to release first):
+#
+#   git tag -a v0.2.0 -m "v0.2.0" && git push <remote> v0.2.0
+#
+# That pushes :0.2.0, :0.2, :latest and :openvino-0.2.0, then creates the GitHub
+# Release. A pre-release tag (v0.2.0-rc1) pushes only :0.2.0-rc1 and
+# :openvino-0.2.0-rc1, marks the Release as a pre-release, and leaves :0.2 and
+# :latest where they were.
+#
+# If the package already exists but wasn't created by this workflow, give this
+# repo write access once: package settings -> Manage Actions access -> add the
+# repo with the Write role. Otherwise the push fails with 403 permission_denied.
+name: Publish image
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [release]
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: publish-image
+  cancel-in-progress: false
+
+jobs:
+  openvino:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      actions: read  # the release gate below reads CI's runs
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # workflow_run: the commit CI tested, not whatever release is now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Image name and tags
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/diyport"
+          sha="$(git rev-parse HEAD)"
+          version="" prerelease=false
+          if [ "$EVENT" = push ]; then
+            version="${REF_NAME#v}"
+            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::tag $REF_NAME is not vMAJOR.MINOR.PATCH[-PRERELEASE]"
+              exit 1
+            fi
+            tags="$image:$version,$image:openvino-$version"
+            if [[ "$version" == *-* ]]; then
+              prerelease=true
+            else
+              tags="$tags,$image:${version%.*},$image:latest"
+            fi
+          else
+            tags="$image:openvino,$image:openvino-${sha:0:7}"
+          fi
+          {
+            echo "image=$image"
+            echo "sha=$sha"
+            echo "short=${sha:0:7}"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "tags=$tags"
+          } >> "$GITHUB_OUTPUT"
+          echo "publishing: $tags"
+
+      - name: Release only a commit that passed CI
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.meta.outputs.sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          passed="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$SHA" \
+                      --status success --json databaseId --jq length)"
+          if [ "${passed:-0}" -eq 0 ]; then
+            echo "::error::CI has not passed on ${SHA:0:7}; push it to release, wait for CI, then re-push tag $REF_NAME"
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (ACCEL=openvino, FACES=1, amd64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            ACCEL=openvino
+            FACES=1
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version || steps.meta.outputs.short }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.description=DIY Port AI Port emulator with the OpenVINO detector backend (Intel iGPU/Arc/NPU) and face detection/recognition, amd64. Run with --device /dev/dri.
+          cache-from: type=gha,scope=openvino
+          cache-to: type=gha,scope=openvino,mode=max
+
+      - name: Smoke test the pushed image (CPU plugin; runners have no Intel GPU)
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          curl -fsSL -o bus.jpg \
+            https://raw.githubusercontent.com/airockchip/rknn_model_zoo/v2.3.2/examples/yolov5/model/bus.jpg
+          # The first tag is the most specific one: the version, or openvino-<sha>.
+          docker run --rm -v "$PWD/bus.jpg:/bus.jpg:ro" --entrypoint python3 "${IMAGE_TAGS%%,*}" \
+            scripts/detector_check.py --image /bus.jpg --expect person --runs 5
+
+  release:
+    needs: openvino
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.openvino.outputs.version }}
+          TAGS: ${{ needs.openvino.outputs.tags }}
+          PRERELEASE: ${{ needs.openvino.outputs.prerelease }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/diyport"
+          tag_list=""
+          IFS=, read -ra pushed <<< "$TAGS"
+          for t in "${pushed[@]}"; do tag_list+="\`${t##*:}\` "; done
+          {
+            echo "## Container image (OpenVINO + faces, linux/amd64)"
+            echo
+            echo '```'
+            echo "docker pull $image:$VERSION"
+            echo "docker run -d --network host --cap-add NET_ADMIN --device /dev/dri $image:$VERSION"
+            echo '```'
+            echo
+            echo "Tags: ${tag_list% }"
+            echo
+            gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$TAG" --jq .body
+          } > notes.md
+          flags=(--latest)
+          [ "$PRERELEASE" = true ] && flags=(--prerelease --latest=false)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$TAG" --notes-file notes.md "${flags[@]}"

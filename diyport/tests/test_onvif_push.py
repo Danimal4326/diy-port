@@ -913,7 +913,7 @@ class TestSharedPushes(unittest.TestCase):
         self.addCleanup(os.unlink, f.name)
         cat = [sys.executable, "-c",
                "import sys,time; sys.stdout.buffer.write(open(sys.argv[1],'rb').read());"
-               "sys.stdout.flush(); time.sleep(0.5)", f.name]
+               "sys.stdout.flush(); time.sleep(10)", f.name]
         launched = []
 
         def fake_cmd(*args, **kw):
@@ -921,6 +921,7 @@ class TestSharedPushes(unittest.TestCase):
             return cat
 
         servers, received = [], {}
+        first = {name: threading.Event() for name in ("S1", "S2")}
         for name in ("S1", "S2"):
             srv = socket.socket()
             srv.bind(("127.0.0.1", 0))
@@ -938,6 +939,7 @@ class TestSharedPushes(unittest.TestCase):
                 if not chunk:
                     break
                 data += chunk
+                first[name].set()
             conn.close()
             received[name] = data
 
@@ -950,10 +952,15 @@ class TestSharedPushes(unittest.TestCase):
                                          f"tcp://127.0.0.1:{srv.getsockname()[1]}",
                                          pool=pool).start()
                       for i, (name, srv) in enumerate(servers)]
-            for t in threads:
-                t.join(15)
+            # Stop once both pushes have delivered, not after a fixed source lifetime:
+            # the pull would otherwise retry and launch a second ffmpeg.
+            for event in first.values():
+                self.assertTrue(event.wait(10), "a push delivered nothing")
+            time.sleep(0.3)  # let the first chunks drain before stopping
             for push in pushes:
                 push.stop()
+            for t in threads:
+                t.join(15)
         self.assertEqual(len(launched), 1)
         for name in ("S1", "S2"):
             data = received[name]
@@ -980,10 +987,6 @@ class TestDrainSocket(unittest.TestCase):
         thread.join(5)
         self.assertFalse(thread.is_alive())
         ours.close()
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class SharedDecodeTest(unittest.TestCase):
@@ -1069,3 +1072,8 @@ class SharedDecodeTest(unittest.TestCase):
         self.assertEqual(a, onvif_push.detect_socket("rtsp://u:p@cam/1"))
         self.assertNotEqual(a, onvif_push.detect_socket("rtsp://u:p@cam/2"))
         self.assertNotIn("u:p", a)
+        self.assertEqual(os.stat(os.path.dirname(a)).st_mode & 0o777, 0o700)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -137,6 +137,17 @@ class TestStreamDir(unittest.TestCase):
     def test_tmpfs_base_writable(self):
         self.assertTrue(os.path.isdir(config._tmpfs_base()))
 
+    def test_make_stream_dir_fixes_an_existing_parent(self):
+        # An older version (or another user) may have made the shared parent 0755.
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = os.path.join(tmp, "aiport-streams")
+            os.mkdir(parent)
+            os.chmod(parent, 0o755)
+            path = os.path.join(parent, "instance")
+            config.make_stream_dir(path)
+            self.assertTrue(os.path.isdir(path))
+            self.assertEqual(os.stat(parent).st_mode & 0o7777, 0o1777)
+
 
 class TestLoadConfig(unittest.TestCase):
     def test_defaults_and_override(self):

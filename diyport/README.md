@@ -740,7 +740,8 @@ MAC and propagates the overridable subset on the next reconnect pass.
 
 Tracking changes are checked offline on recorded clips instead of waiting for live events.
 Record what a paired camera sends while diy-port is running (it finds the stream URL and the
-camera's Protect settings in `~/diyport.log`):
+camera's Protect settings in the instance's `logs/diyport.log`, by default
+`~/.diy-port/native/logs/diyport.log`):
 
 ```bash
 scripts/record_clip.py 02000000000C 60 camera-walk

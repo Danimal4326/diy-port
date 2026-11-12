@@ -694,7 +694,7 @@ class SharedPull:
         except UnsupportedCodec as exc:
             codec_error = exc.codec
             reason = str(exc)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, struct.error) as exc:
             reason = repr(exc)
         finally:
             if proc and proc.poll() is None:
@@ -794,9 +794,17 @@ DETECT_QUEUE = 300                     # tags a client may fall behind before it
 
 def detect_socket(source_url):
     """The unix socket serving a camera's video1 to detection, named from its url so avclient
-    and the restream process find the same one without passing it."""
+    and the restream process find the same one without passing it. Each uid gets a private
+    directory (0700): another local user cannot read the video or take the name."""
     digest = hashlib.sha1(source_url.encode()).hexdigest()[:12]
-    return os.path.join(tempfile.gettempdir(), f"diyport-detect-{digest}.sock")
+    directory = os.path.join(tempfile.gettempdir(),
+                             f"diyport-detect-{getattr(os, 'getuid', lambda: 0)()}")
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    return os.path.join(directory, f"{digest}.sock")
 
 
 # How long detection waits for the video1 push to send a frame before it falls back to its own
@@ -963,17 +971,23 @@ class DetectServer:
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(path)
         self._sock.listen(2)
+        self._sock.settimeout(1.0)  # so close() can wake _accept
+        self._stop = threading.Event()
         threading.Thread(target=self._accept, daemon=True, name="detect-accept").start()
 
     def _accept(self):
-        while True:
+        while not self._stop.is_set():
             try:
                 conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
             except OSError:
                 return
+            conn.settimeout(None)  # accept() inherited the listener's 1 s timeout
             DetectClient(conn, self.pull)
 
     def close(self):
+        self._stop.set()
         self._sock.close()
         try:
             os.unlink(self.path)
@@ -1340,10 +1354,16 @@ class FlvPush:
                     self.last_sent = time.monotonic()
                     if clock:
                         clock.wrote(_tag_timestamp(item[1]))
-        except OSError as exc:
+        except (OSError, ValueError, struct.error) as exc:
             reason = repr(exc)
         finally:
             if self._sock:
+                # The drain thread holds a reference to this socket: close() alone would
+                # not close the fd or send FIN, leaving Protect a second live push.
+                try:
+                    self._sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
                 self._sock.close()
                 self._sock = None
         if not self._stop.is_set():

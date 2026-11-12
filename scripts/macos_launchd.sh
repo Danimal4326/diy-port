@@ -1,5 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 The DIY-Port project
 # Run diy-port under launchd on macOS: started at boot or login, restarted if it exits, logging
 # with rotation (scripts/diyport_service.sh does the work). Each instance has its own folder,
 # ~/.diy-port/$DIYPORT_INSTANCE/ ("native" when not set; see scripts/diyport_paths.sh), and its
@@ -141,15 +142,16 @@ check_ownership() {
 check_not_running() {
     # This instance only (its state dir), so another instance can keep running.
     # A job just booted out takes a few seconds to stop (ExitTimeOut), so wait for it first.
-    local pids pattern="diyport/run_all.py .*--state-dir $(state_dir)( |$)"
+    local pids pattern
+    pattern="diyport/run_all.py .*--state-dir $(state_dir)( |$)"
     for _ in $(seq 1 30); do
         pids=$(pgrep -f "$pattern" || true)
         [ -z "$pids" ] && break
         sleep 1
     done
     if [ -n "$pids" ] && ! loaded "$LABEL"; then
-        echo "$INSTANCE is already running outside launchd (pid $(echo $pids | tr ' ' ','))." >&2
-        echo "Stop it first (Ctrl-C in its terminal, or: sudo kill -INT $(echo $pids | tr ',' ' '))." >&2
+        echo "$INSTANCE is already running outside launchd (pid $(printf '%s' "$pids" | tr ' ' ','))." >&2
+        echo "Stop it first (Ctrl-C in its terminal, or: sudo kill -INT $(printf '%s' "$pids" | tr ',' ' '))." >&2
         exit 1
     fi
 }

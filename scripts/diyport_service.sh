@@ -1,5 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 The DIY-Port project
 # Run diy-port on macOS and restart it without a new terminal or password.
 #
 #   scripts/macos_launchd.sh install     as a launchd agent under your account (recommended)
@@ -25,11 +26,13 @@ if [ "$(uname)" != Darwin ] && [ "$(id -u)" -ne 0 ] && [ -z "${DIYPORT_SERVICE_T
     echo "run with sudo: it binds port 443 on the interface's address" >&2
     exit 1
 fi
+# shellcheck disable=SC2034  # read by diyport_paths.sh
 USER_HOME=$(eval echo "~${SUDO_USER:-${USER:-$(id -un)}}")
 REPO=${DIYPORT_SERVICE_TEST:-$(cd "$(dirname "$0")/.." && pwd)}  # the test points it at a stub
 # ENV_FILE, TRIGGER, LOG, PIDFILE and DEFAULT_STATE_DIR. PIDFILE holds diy-port's process
 # group, so a wrapper killed outright (yesterday's app restart) doesn't leave an orphan holding
 # :443 that the next start can't get past.
+# shellcheck disable=SC1091  # resolved at runtime from the script's own directory
 . "$(dirname "$0")/diyport_paths.sh"
 
 load_settings() {

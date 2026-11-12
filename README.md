@@ -378,7 +378,7 @@ venv/bin/pip install "fast-alpr[onnx]" opencv-python-headless   # optional: plat
 venv/bin/python scripts/fetch_models.py --backend cpu      # downloads yolov5n.onnx
 venv/bin/python scripts/fetch_models.py --face-models-only # optional: YuNet/SFace face models
 $EDITOR diyport/aiport.cfg                                   # set [console] host + device_id
-caffeinate -is venv/bin/python diyport/run_all.py --iface en0 --state-dir ~/.diyport-state
+caffeinate -is venv/bin/python diyport/run_all.py --iface en0 --state-dir ~/.diy-port/native/state
 ```
 
 No sudo is needed on macOS: since 10.14 a normal user can bind ports below 1024. Running it
@@ -386,7 +386,8 @@ with sudo leaves the state dir and log root-owned, and the launchd agent then re
 
 To run it as a service instead, install the launchd agent (no sudo):
 `scripts/macos_launchd.sh install` starts it at login, restarts it on exit, and re-reads
-`~/.diyport.env` on `touch ~/.diyport-restart`; logs rotate in `~/diyport.log`.
+the instance's `diyport.env` on touching its `restart` file; logs rotate in its
+`logs/diyport.log`. The defaults are under `~/.diy-port/native/`; see `scripts/diyport_paths.sh`.
 `scripts/diyport_service.sh` does the work and can also run in a terminal. See `diyport/README.md`.
 
 - `caffeinate -is` stops the Mac sleeping while it runs (a sleeping Mac drops off the console).
@@ -456,16 +457,18 @@ per-camera exceptions by device ID (MAC), such as `isolated,AABBCCDDEEFF=copy`.
 | Mode | What it does | Pushes run in | Camera sessions | Sizes sent to Protect |
 |---|---|---|---|---|
 | `copy` (default) | `ffmpeg` copies the camera's main stream and substream | `avclient.py` | 3, with detection | The camera's own |
-| `transcode` | One `gst-launch` decodes the main stream once and encodes each channel with VideoToolbox, as the real AI Port does | `avclient.py` | 2, with detection | `video1` main size at 4000 kbps, `video2` substream size at 2000 kbps, `video3` 360 lines at 500 kbps |
-| `isolated` | As `transcode` | A process per camera | 2, with detection | As `transcode` |
+| `transcode` | One `gst-launch` decodes the main stream once and encodes each channel with VideoToolbox, as the real AI Port does | `avclient.py` | 1 (2 with `AIPORT_ONVIF_SHARED_DECODE=0`) | `video1` main size at 4000 kbps, `video2` substream size at 2000 kbps, `video3` 360 lines at 500 kbps |
+| `isolated` | As `transcode` | A process per camera | 1 (2 with `AIPORT_ONVIF_SHARED_DECODE=0`) | As `transcode` |
 
 `transcode` and `isolated` need macOS and `brew install gstreamer`. On an M1 Pro a transcoded
 camera used about 11% of one core and up to about 290 MB, against about 1% and 11 MB for
 `copy`. On a machine without them, the camera logs an error and uses `copy`.
 
-In `isolated`, a crash in the push costs that camera's video for a few seconds and leaves
-detection running, and the process is replaced. It doesn't help the other way round: if
-detection's process dies, the push stops with it.
+In `isolated`, a crash in the push costs that camera's video for a few seconds and the
+process is replaced. With shared decode on (the default) detection reads the video1 that
+process pushes, so detection also pauses until the replacement starts; with
+`AIPORT_ONVIF_SHARED_DECODE=0` detection keeps its own pull. It doesn't help the other way
+round: if detection's process dies, the push stops with it.
 
 Protect doesn't always tell diy-port it was removed: it just closes each connection without
 a message. An adopted instance logs `was this AI Port removed in Protect?` once this has
@@ -679,7 +682,8 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
   paired.
 - **Known:** an assigned ONVIF camera depends on the AI Port for its video (no
   recording while the AI Port is down). video1 carries the main stream and
-  video2/video3 the camera's substream; audio is pushed as AAC and Opus.
+  video2/video3 the camera's substream; audio is copied (G.711, AAC or MP3) or
+  re-encoded to AAC when FLV cannot carry it. Opus is not pushed.
 - **Known:** in the same-host Docker setup the AI Port is only reachable from
   its own host, so it only suits a console running on that host.
 - **Known:** on the Raspberry Pi 4 the H.264 hardware decoder is instance-limited

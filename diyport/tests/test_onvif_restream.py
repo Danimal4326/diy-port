@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 The DIY-Port project
 """Unit and real-process tests for onvif_restream.py: a camera's video push in its own process."""
 import os
 import signal
@@ -150,6 +151,14 @@ class TestProcessCommands(unittest.TestCase):
         self.assertEqual(self.p.report(now=130.0), {"video1": None})
         self.made[0].last_sent = 125.0
         self.assertEqual(self.p.report(now=130.0), {"video1": 5.0})
+
+
+class TestCommandLogging(unittest.TestCase):
+    def test_a_failed_command_never_logs_the_rtsp_login(self):
+        safe = rs._command_summary({"op": "start", "channel": "video1",
+                                    "url": "rtsp://admin:s3cr3t@192.0.2.10/1"})
+        self.assertNotIn("s3cr3t", str(safe))
+        self.assertIn("192.0.2.10/1", str(safe))
 
 
 class TestWorkerReports(unittest.TestCase):

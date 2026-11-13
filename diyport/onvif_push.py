@@ -829,7 +829,8 @@ def detect_socket(source_url):
     """The unix socket serving a camera's video1 to detection, named from its url so avclient
     and the restream process find the same one without passing it. Each uid gets a private
     directory (0700): another local user cannot read the video or take the name."""
-    digest = hashlib.sha1(source_url.encode()).hexdigest()[:12]
+    namespace = os.environ.get("AIPORT_DETECT_NAMESPACE", "")
+    digest = hashlib.sha1(f"{namespace}\0{source_url}".encode()).hexdigest()[:12]
     directory = os.path.join(tempfile.gettempdir(),
                              f"diyport-detect-{getattr(os, 'getuid', lambda: 0)()}")
     os.makedirs(directory, mode=0o700, exist_ok=True)

@@ -5147,6 +5147,8 @@ def main():
         # RAM-only handoff; http_api.py derives the same dir from --state-dir.
         _STREAM_DIR = config.stream_dir(args.state_dir)
         STATE_DIR = args.state_dir
+    # The restream child inherits this, so both sides name the same detect socket.
+    os.environ["AIPORT_DETECT_NAMESPACE"] = os.path.abspath(STATE_DIR or HERE)
     _reset_stream_dir()
     if hoststats.enabled():
         # Once a minute beside the frame stats: CPU by diy-port/Frigate/OrbStack, GPU, ANE.

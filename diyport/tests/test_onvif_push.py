@@ -1296,6 +1296,15 @@ class SharedDecodeTest(unittest.TestCase):
         self.assertNotIn("u:p", a)
         self.assertEqual(os.stat(os.path.dirname(a)).st_mode & 0o777, 0o700)
 
+    def test_socket_is_namespaced_by_instance(self):
+        with mock.patch.dict(os.environ, {"AIPORT_DETECT_NAMESPACE": "/state/a"}):
+            a = onvif_push.detect_socket("rtsp://cam/1")
+            again = onvif_push.detect_socket("rtsp://cam/1")
+        with mock.patch.dict(os.environ, {"AIPORT_DETECT_NAMESPACE": "/state/b"}):
+            b = onvif_push.detect_socket("rtsp://cam/1")
+        self.assertEqual(a, again)
+        self.assertNotEqual(a, b)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -84,6 +84,8 @@ A sync every 1 s was worse; G3 sync was "very stable".
 - If Protect re-sends the settings for every configured channel at once, each push opens a
   fresh Protect connection in place; the shared gst pull and its DetectServer stay up, so
   detection does not pause for the re-send.
+- `transcode`/`isolated` need an H.264 main stream. A probed H.265 camera logs one
+  error and uses `copy`; the copy push still rejects HEVC with its normal message.
 - `isolated` only contains failures one way: if `avclient.py` dies, the pushes stop too.
   With shared decode on, detection reads the pushed video1, so a restream process crash
   also pauses detection until its replacement starts.

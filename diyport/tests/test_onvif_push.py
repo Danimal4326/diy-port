@@ -240,6 +240,23 @@ class TestPushManager(unittest.TestCase):
             self.assertEqual(len(self.started), 2)
             self.started[0].stop.assert_called_once()
 
+    def test_h265_camera_falls_back_to_copy(self):
+        self.addCleanup(onvif_push._codecs.clear)
+        self.addCleanup(onvif_push._codec_fell_back.clear)
+        with _modes("transcode"):
+            onvif_push.note_codec("CAM", "hevc")
+            self.assertFalse(onvif_push.transcodes("CAM"))
+            self.m.set_source("CAM", "rtsp://cam/101", width=2560, height=1440, fps=20,
+                              codec="hevc")
+            self.m.configure("CAM", _settings("video1", "S1"))
+        self.assertIsNone(self.started[0].renditions)
+
+    def test_h264_camera_stays_on_transcode(self):
+        self.addCleanup(onvif_push._codecs.clear)
+        with _modes("transcode"):
+            onvif_push.note_codec("CAM", "h264")
+            self.assertTrue(onvif_push.transcodes("CAM"))
+
     def test_full_re_send_reconnects_without_replacing_pushes(self):
         settings = {**_settings("video1", "S1"), **_settings("video2", "S2"),
                     **_settings("video3", "S3")}
@@ -287,7 +304,8 @@ class TestPushManager(unittest.TestCase):
     def test_source_geometry_and_audio(self):
         self.m.set_source("CAM", "rtsp://cam/101", audio=False, width=3840, height=2160, fps=12)
         self.assertEqual(self.m.source("CAM"), {"url": "rtsp://cam/101", "audio": False,
-                                                "width": 3840, "height": 2160, "fps": 12})
+                                                "width": 3840, "height": 2160, "fps": 12,
+                                                "codec": None})
 
     def _two_profiles(self):
         self.profiles = [

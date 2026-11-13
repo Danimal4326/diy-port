@@ -92,6 +92,14 @@ def parse_modes(value):
 
 MODES = parse_modes(os.environ.get("AIPORT_ONVIF_MODE"))
 _fell_back = set()  # cameras already logged as falling back to copy
+_codecs = {}        # camera id -> probed video codec (h264, hevc, ...)
+_codec_fell_back = set()
+
+
+def note_codec(device_id, codec):
+    """Remember the probed video codec; None leaves the last known value alone."""
+    if codec:
+        _codecs[_camera_id(device_id)] = str(codec).lower()
 
 
 def transcode_available():
@@ -114,7 +122,18 @@ def mode_of(device_id):
 
 
 def transcodes(device_id):
-    return mode_of(device_id) != COPY
+    mode = mode_of(device_id)
+    if mode == COPY:
+        return False
+    key = _camera_id(device_id)
+    codec = _codecs.get(key)
+    if codec and codec not in ("h264", "avc"):
+        if key not in _codec_fell_back:
+            _codec_fell_back.add(key)
+            log.error("camera %s is %s; transcode/isolated need H.264, using copy", device_id,
+                      codec)
+        return False
+    return True
 
 
 def warn_old_settings(environ=None):
@@ -1521,10 +1540,12 @@ class PushManager:
         self._subs = {}      # main url -> substream profile dict, or None (none/failed)
         self._looking_up = set()  # main urls whose profiles are being fetched
 
-    def set_source(self, device_id, url, audio=True, width=None, height=None, fps=None):
+    def set_source(self, device_id, url, audio=True, width=None, height=None, fps=None,
+                   codec=None):
+        note_codec(device_id, codec)
         with self._lock:
             self._sources[device_id] = {"url": url, "audio": bool(audio), "width": width,
-                                        "height": height, "fps": fps}
+                                        "height": height, "fps": fps, "codec": codec}
             lookup = url not in self._subs and url not in self._looking_up
             if lookup:
                 self._looking_up.add(url)

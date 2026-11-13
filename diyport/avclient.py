@@ -745,6 +745,8 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
     out_path = os.path.join(_STREAM_DIR, f"{device_id}.jpg")
     probe = _probe_stream(url)
     _stream_probe[device_id] = probe
+    if direct:
+        onvif_push.note_codec(device_id, probe.get("codec"))
     shared = _shared_decode_source(device_id, url) if direct else None
     if probe["width"] and probe["height"]:
         # What the stream really is beats what the controller announced.
@@ -4575,7 +4577,8 @@ def _start_onvif_camera(ws, msg_id, payload):
                     # start must not cost the camera its video.
                     width, height = _onvif_main_size(device_id, payload)
                     _onvif.set_source(device_id, url, audio=payload.get("audio", True),
-                                      width=width, height=height, fps=payload.get("fps"))
+                                      width=width, height=height, fps=payload.get("fps"),
+                                      codec=(_stream_probe.get(device_id) or {}).get("codec"))
                 _start_motion_detector(ws, device_id, preserve_tracks=True)
                 # Counted, health-watched and stall-checked like a UiStreamControl camera.
                 points = _stream_points_for(payload.get("width"), payload.get("height"),

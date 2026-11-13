@@ -6,7 +6,7 @@ all of that instance's cameras.
 
 | Mode | Video | Pushes run in | Camera sessions | Cost per camera |
 |---|---|---|---|---|
-| `copy` (default) | ffmpeg copies the streams | `avclient.py` | 3 | About 1% of a core, 22 MB |
+| `copy` (default) | ffmpeg copies the streams | `avclient.py` | 3 | About 1% of a core, 11-22 MB |
 | `transcode` | GStreamer encodes each channel | `avclient.py` | 1 (2 with shared decode off) | About 8-15% of a core, 130-290 MB |
 | `isolated` | As `transcode` | A process per camera | 1 (2 with shared decode off) | As `transcode`, plus 15 MB |
 

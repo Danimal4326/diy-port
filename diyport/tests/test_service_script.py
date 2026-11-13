@@ -33,7 +33,6 @@ STUB = textwrap.dedent("""\
     """)
 
 
-@unittest.skipUnless(sys.platform == "darwin", "the script uses macOS stat -f")
 class TestServiceScript(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

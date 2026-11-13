@@ -80,7 +80,7 @@ ensure_alias() {
     ifconfig "$DIYPORT_IFACE" alias "$DIYPORT_BIND_IP" 255.255.255.255
 }
 
-mtime() { stat -f %m "$1" 2>/dev/null || echo 0; }
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 
 child=""
 stop_child() {

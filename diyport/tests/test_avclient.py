@@ -158,9 +158,10 @@ class TestEventFaceResume(unittest.TestCase):
         return d
 
     def test_moved_face_continues_the_nearest_closed_face(self):
-        dev = {"recent": [(5, self.face([100, 100, 40, 40]), 0),
-                          (9, self.face([600, 300, 40, 40]), 0)]}
-        tid, _tr, how = av._resume_recent(dev, self.read([500, 320, 45, 45]), self.EVENT)
+        dev = {"recent": [(5, self.face([100, 100, 40, 40], emb=[1.0, 0.0]), 0),
+                          (9, self.face([600, 300, 40, 40], emb=[1.0, 0.0]), 0)]}
+        tid, _tr, how = av._resume_recent(dev, self.read([500, 320, 45, 45], emb=[1.0, 0.0]),
+                                           self.EVENT)
         self.assertEqual((tid, how), (9, "event"))
         self.assertEqual([r[0] for r in dev["recent"]], [5])
 
@@ -175,6 +176,11 @@ class TestEventFaceResume(unittest.TestCase):
         tid, _tr, _how = av._resume_recent(dev, self.read([200, 100, 40, 40], emb=[0.0, 1.0]),
                                            self.EVENT)
         self.assertEqual(tid, 9)
+
+    def test_embeddingless_read_must_be_near_its_closed_face(self):
+        dev = {"recent": [(5, self.face([100, 100, 40, 40]), 0)]}
+        self.assertIsNone(av._resume_recent(dev, self.read([900, 900, 40, 40]), self.EVENT))
+        self.assertEqual(av._resume_recent(dev, self.read([110, 110, 40, 40]), self.EVENT)[0], 5)
 
     def test_named_face_needs_an_embedding_that_agrees(self):
         named = self.face([100, 100, 40, 40], emb=[1.0, 0.0], matchedId=196, matchedName="A")
@@ -1861,6 +1867,13 @@ class TestCameraEvent(Base):
         better = (4, {"objectType": "person", "score": 0.1, "best": {"score": 0.99}})
         self.assertEqual(av._leave_track([person, better])[0], 4)
 
+    def test_fm_hold_clears_when_no_model_work_is_pending(self):
+        tr = {"fm_pending": 1, "fm_hold_ms": 1000}
+        self.assertTrue(av._fm_hold(tr, 2000))
+        tr["fm_pending"] = 0
+        self.assertFalse(av._fm_hold(tr, 3000))
+        self.assertNotIn("fm_hold_ms", tr)
+
     def test_motion_settings_max_duration(self):
         av.handle_function(None, {"functionName": "ChangeSmartMotionSettings", "messageId": 1,
                                   "payload": {"deviceID": "D", "eventMaxDurationMSec": 300000}},
@@ -1944,6 +1957,12 @@ class TestMultiLeave(Base):
         members = self.members()
         members[0][1]["best"]["coord"] = [900, 900, 20, 20]
         self.assertEqual(av._associate_faces(members), {})
+
+    def test_send_failure_does_not_leave_pending_names(self):
+        with mock.patch.object(av, "send_msg", side_effect=OSError("closed")):
+            with self.assertRaises(OSError):
+                av._send_multi_leave(None, "D", 9, self.members(), lambda: None)
+        self.assertEqual(av._pending_leaves, {})
 
 
 @unittest.skipUnless(_CV2, "OpenCV not installed")

@@ -271,8 +271,7 @@ class Enricher:
             try:
                 alpr = self._get_alpr()
             except Exception:
-                log.exception("plate model load failed -- plates disabled")
-                self.lpr = False
+                log.exception("plate model load failed -- will retry")
                 return []
             for parent, coord in enumerate(vehicle_coords):
                 x1, y1, x2, y2 = _expand_px(coord, iw, ih)
@@ -311,8 +310,7 @@ class Enricher:
             try:
                 yunet, sface = self._get_face_models()
             except Exception:
-                log.exception("face model load failed -- faces disabled")
-                self.face = False
+                log.exception("face model load failed -- will retry")
                 return []
             self._refresh_gallery(yunet, sface)
             for parent, coord in enumerate(person_coords):
@@ -357,6 +355,7 @@ class Enricher:
         """(Re)load <faces_dir>/<Name>/*.jpg when anything in it changed."""
         if sface is None or not self.faces_dir or not os.path.isdir(self.faces_dir):
             self._gallery = []
+            self._gallery_stamp = None  # rebuild when the directory returns
             return
         files = []
         for name in sorted(os.listdir(self.faces_dir)):

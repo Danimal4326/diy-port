@@ -1539,6 +1539,7 @@ def _request_fm(device_id, tr):
     tr["fm_sent"] = tr.get("fm_sent", 0) + 1
     tr["fm_last_ms"] = now
     tr["fm_pending"] = tr.get("fm_pending", 0) + 1
+    tr["fm_hold_ms"] = now
     job = (device_id, tr, best["jpeg"], list(best["coord"]))
     if VEHICLE_FM_SYNC:
         _fm_job(*job, locked=True)
@@ -1558,6 +1559,7 @@ def _fm_hold(tr, now_ms):
     """True while a vehicle track that would close waits for a pending model answer, up to
     VEHICLE_FM_HOLD_MS: live 16:11 a bus's "bus yellow" arrived 2 s after its leave."""
     if not tr.get("fm_pending"):
+        tr.pop("fm_hold_ms", None)
         return False
     return now_ms - tr.setdefault("fm_hold_ms", now_ms) < VEHICLE_FM_HOLD_MS
 
@@ -2293,6 +2295,7 @@ def _resume_recent(dev, d, event):
 # A face returning in an open event continues its nearest closed face track only when the
 # embedding matches; a different or named face starts its own.
 FACE_RESUME_MIN_SIM = 0.3
+FACE_RESUME_MAX_DIST_FACTOR = 2.0  # old face size, when the new read has no embedding
 
 
 def _face_similarity(a, b):
@@ -2357,6 +2360,8 @@ def _event_face(dev, d, event):
             continue  # a named face takes only a read shown to be the same person
         x, y, w, h = tr["coord"]
         dist = math.hypot(x + w / 2 - cx, y + h / 2 - cy)
+        if sim is None and dist > max(w, h) * FACE_RESUME_MAX_DIST_FACTOR:
+            continue
         if best_dist is None or dist < best_dist:
             best, best_dist = (i, tid, tr, "event"), dist
     return best
@@ -2725,7 +2730,12 @@ def _send_multi_leave(ws, device_id, event_id, members, fallback):
         except Exception:
             log.exception("single-tracker fallback leave failed for event %s", event_id)
 
-    send_msg(ws, "EventSmartDetect", payload, response_expected=False)
+    try:
+        send_msg(ws, "EventSmartDetect", payload, response_expected=False)
+    except Exception:
+        for n in names:
+            _pending_leaves.pop(n, None)
+        raise
     timer = threading.Timer(LEAVE_FALLBACK_S, _check)
     timer.daemon = True
     timer.start()

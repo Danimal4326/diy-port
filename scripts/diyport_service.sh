@@ -84,10 +84,13 @@ mtime() { stat -f %m "$1" 2>/dev/null || echo 0; }
 
 child=""
 stop_child() {
-    if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+    if [ -n "$child" ] && { kill -0 -- "-$child" 2>/dev/null || kill -0 "$child" 2>/dev/null; }; then
         kill -INT -- "-$child" 2>/dev/null || kill -INT "$child"   # its whole process group
         kill -CONT -- "-$child" 2>/dev/null   # a stopped process can't act on the signal
-        for _ in $(seq 1 20); do kill -0 "$child" 2>/dev/null || break; sleep 0.5; done
+        for _ in $(seq 1 20); do
+            kill -0 -- "-$child" 2>/dev/null || break
+            sleep 0.5
+        done
         kill -TERM -- "-$child" 2>/dev/null
         kill -CONT -- "-$child" 2>/dev/null
         wait "$child" 2>/dev/null
@@ -96,11 +99,17 @@ stop_child() {
 }
 stop_stale() {
     # A diy-port left by an earlier wrapper that was killed outright: it has its own process
-    # group, so it outlives the wrapper and keeps :443.
+    # group, so it outlives the wrapper and keeps :443. The leader may be gone while its
+    # stage children remain, so check the group as well as the pid.
     local old
     old=$(cat "$PIDFILE" 2>/dev/null) || return 0
     if [ -n "$old" ] && ps -p "$old" -o command= 2>/dev/null | grep -q "run_all.py"; then
         echo "diyport_service: stopping diy-port (pid $old) left running by an earlier start"
+        child=$old
+        stop_child
+    elif [ -n "$old" ] && pgrep -g "$old" -f \
+            "(discovery|http_api|ucp4_client|avclient)\.py" >/dev/null 2>&1; then
+        echo "diyport_service: stopping orphaned diy-port group (pgid $old)"
         child=$old
         stop_child
     fi

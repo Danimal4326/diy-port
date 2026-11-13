@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 
@@ -372,14 +373,38 @@ def make_stream_dir(path):
     os.makedirs(path, exist_ok=True)
 
 
+def default_state_dir():
+    """Per-user runtime state outside the repo: $XDG_STATE_HOME/diyport or ~/.local/state/diyport."""
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(os.path.abspath(base), "diyport")
+
+
+_LEGACY_STATE_FILES = ("adopt_state.json", "server.crt", "server.key",
+                       "fw_version.json", "device_name")
+
+
+def migrate_repo_state(dest):
+    """Copy legacy repo-local state into `dest` once; returns the copied names."""
+    dest = os.path.abspath(dest)
+    if dest == os.path.abspath(HERE):
+        return []
+    os.makedirs(dest, mode=0o700, exist_ok=True)
+    copied = []
+    for name in _LEGACY_STATE_FILES:
+        src, dst = os.path.join(HERE, name), os.path.join(dest, name)
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            copied.append(name)
+    return copied
+
+
 def pinned_fw_version(state_dir=None):
     """Firmware version pinned by a simulated UpdateFirmwareRequest, or None.
 
     avclient.py writes ``fw_version.json`` here on the update (ack + fake reboot,
-    no flash); every stage must pass the same ``--state-dir`` to read it. Without
-    one, all stages share the diyport/ directory.
+    no flash); every stage must pass the same ``--state-dir`` to read it.
     """
-    path = os.path.join(state_dir or HERE, "fw_version.json")
+    path = os.path.join(state_dir or default_state_dir(), "fw_version.json")
     try:
         with open(path) as f:
             version = json.load(f).get("version")
@@ -395,7 +420,7 @@ def effective_fw_version(configured, state_dir=None):
 
 def pin_fw_version(state_dir, version):
     """Persist the version a simulated UpdateFirmwareRequest 'installed'."""
-    atomic_write_json(os.path.join(state_dir or HERE, "fw_version.json"),
+    atomic_write_json(os.path.join(state_dir or default_state_dir(), "fw_version.json"),
                       {"version": version})
 
 
@@ -404,7 +429,7 @@ def device_name(state_dir=None, default=None):
     default. Protect pushes the user's rename via ChangeDeviceSettings; persisting
     it here lets the discovery responder report the same name Network shows."""
     try:
-        with open(os.path.join(state_dir or HERE, "device_name")) as f:
+        with open(os.path.join(state_dir or default_state_dir(), "device_name")) as f:
             name = f.read().strip()
         return name or (default or DEFAULTS["name"])
     except OSError:
@@ -412,7 +437,7 @@ def device_name(state_dir=None, default=None):
 
 
 def set_device_name(state_dir, name):
-    path = os.path.join(state_dir or HERE, "device_name")
+    path = os.path.join(state_dir or default_state_dir(), "device_name")
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         f.write(name)

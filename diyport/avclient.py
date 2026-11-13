@@ -57,9 +57,10 @@ import regions
 from procutil import start_stderr_drain
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ADOPT_STATE_FILE = os.path.join(HERE, "adopt_state.json")
-CERT_PATH = os.path.join(HERE, "server.crt")
-KEY_PATH = os.path.join(HERE, "server.key")
+DEFAULT_STATE_DIR = config.default_state_dir()
+ADOPT_STATE_FILE = os.path.join(DEFAULT_STATE_DIR, "adopt_state.json")
+CERT_PATH = os.path.join(DEFAULT_STATE_DIR, "server.crt")
+KEY_PATH = os.path.join(DEFAULT_STATE_DIR, "server.key")
 _PROCESS_START_MS = int(time.time() * 1000)
 
 _msg_id_counter = itertools.count(1)
@@ -68,8 +69,8 @@ _msg_id_counter = itertools.count(1)
 _active_streams = {}
 # tmpfs dir ffmpeg writes each camera's snapshot JPEG into (never persistent).
 _STREAM_DIR = config.stream_dir()
-# --state-dir (or None for the shared diyport/ path); the firmware pin lives here.
-STATE_DIR = None
+# --state-dir overrides this; the firmware pin and face DB live here.
+STATE_DIR = DEFAULT_STATE_DIR
 # deviceID -> consecutive unexpected-death count since the last UiStreamControl start.
 _stream_restart_count = {}
 STREAM_RETRY_MAX_S = 30.0   # longest wait between pulls of a source that keeps failing
@@ -5110,6 +5111,8 @@ def main():
         # RAM-only handoff; http_api.py derives the same dir from --state-dir.
         _STREAM_DIR = config.stream_dir(args.state_dir)
         STATE_DIR = args.state_dir
+    else:
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
     # The restream child inherits this, so both sides name the same detect socket.
     os.environ["AIPORT_DETECT_NAMESPACE"] = os.path.abspath(STATE_DIR or HERE)
     _reset_stream_dir()

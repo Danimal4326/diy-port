@@ -779,9 +779,9 @@ not responsible or liable for any loss or damage arising from its use.**
 Report vulnerabilities privately via GitHub Security Advisories. Runtime state -
 the adoption token and the mTLS client certificate/key - belongs in the instance
 state directory passed as `--state-dir`; the service and launchd installers
-always pass one. A manual run without it falls back to the `diyport/` directory,
-so pass `--state-dir` and keep that path out of git. No secrets are stored in
-this repository. Logged payloads are passed through a redaction filter for camera
+always pass one. A manual run defaults to `$XDG_STATE_HOME/diyport` (or
+`~/.local/state/diyport`); on first start `run_all.py` copies any old
+repo-local state there. No secrets are stored in this repository. Logged payloads are passed through a redaction filter for camera
 RTSP credentials, the console's login password and adoption tokens.
 
 ## License

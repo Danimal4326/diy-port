@@ -213,6 +213,22 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(cfg["guid"], env["AIPORT_GUID"])
 
 
+class TestStateDir(unittest.TestCase):
+    def test_default_is_outside_the_repo(self):
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": "/srv/state"}):
+            self.assertEqual(config.default_state_dir(), "/srv/state/diyport")
+        self.assertNotEqual(config.default_state_dir(), config.HERE)
+
+    def test_repo_state_is_copied_once(self):
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dst:
+            with open(os.path.join(src, "adopt_state.json"), "w") as f:
+                f.write("{}")
+            with mock.patch.object(config, "HERE", src):
+                self.assertEqual(config.migrate_repo_state(dst), ["adopt_state.json"])
+                self.assertEqual(config.migrate_repo_state(dst), [])
+            self.assertTrue(os.path.exists(os.path.join(dst, "adopt_state.json")))
+
+
 class TestFirmwarePin(unittest.TestCase):
     """A simulated update pins a version; every stage reports it over the configured one."""
 

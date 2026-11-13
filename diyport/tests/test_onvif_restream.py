@@ -356,13 +356,14 @@ while True:
         proc.stdout.close()
 
     def test_a_push_back_in_time_keeps_the_process(self):
-        with mock.patch.object(rs, "IDLE_S", 0.3):
+        with mock.patch.object(rs, "IDLE_S", 0.1), \
+                mock.patch.object(rs.threading, "Timer"):
             worker, push = self._start_push()
             proc = worker.proc
             push.stop()
             again = rs.RemotePush(worker, "video1", "rtsp://cam/101", "S", self.dest, self.ffmpeg,
                                   True, None).start()
-            time.sleep(0.6)
+            worker._retire()  # what the idle timer would do
             self.assertIs(worker.proc, proc)
             self.assertIs(worker.pushes["video1"], again)
 

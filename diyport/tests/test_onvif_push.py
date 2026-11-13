@@ -923,7 +923,7 @@ class TestTranscode(unittest.TestCase):
                 mock.patch.object(onvif_push, "TRANSCODE_STALL_S", 0):
             runner = threading.Thread(target=pull._pull_once, args=(1,), daemon=True)
             runner.start()
-            time.sleep(1.5)
+            runner.join(timeout=0.5)
             self.assertTrue(runner.is_alive())
             pull._stop.set()
             pull._proc.terminate()

@@ -73,6 +73,31 @@ class TestSharedStamp(unittest.TestCase):
                          (1_700_000_000_000, 12_345))
 
 
+class TestSharedDecodeSource(unittest.TestCase):
+    def test_on_for_a_transcoded_camera(self):
+        import onvif_push
+        with mock.patch.object(av._onvif, "source",
+                               return_value={"url": "rtsp://cam/1", "fps": 15}), \
+                mock.patch.object(onvif_push, "SHARED_DECODE", True), \
+                mock.patch.object(onvif_push, "transcodes", return_value=True), \
+                mock.patch.object(onvif_push, "detect_socket", return_value="/tmp/d.sock"):
+            self.assertEqual(av._shared_decode_source("D", "rtsp://cam/1"),
+                             ("/tmp/d.sock", (min(av.DETECT_FPS, 15), 15)))
+
+    def test_off_or_copy_returns_none(self):
+        import onvif_push
+        with mock.patch.object(av._onvif, "source",
+                               return_value={"url": "rtsp://cam/1", "fps": 15}), \
+                mock.patch.object(onvif_push, "SHARED_DECODE", False), \
+                mock.patch.object(onvif_push, "transcodes", return_value=True):
+            self.assertIsNone(av._shared_decode_source("D", "rtsp://cam/1"))
+        with mock.patch.object(av._onvif, "source",
+                               return_value={"url": "rtsp://cam/1", "fps": 15}), \
+                mock.patch.object(onvif_push, "SHARED_DECODE", True), \
+                mock.patch.object(onvif_push, "transcodes", return_value=False):
+            self.assertIsNone(av._shared_decode_source("D", "rtsp://cam/1"))
+
+
 class TestDirectStreamURL(unittest.TestCase):
     def test_refuses_a_non_rtsp_direct_url(self):
         with self.assertRaises(ValueError):
@@ -2846,7 +2871,9 @@ class TestStreamPoints(Base):
         with mock.patch.object(av, "RESET_GRACE_S", 0.15):
             self.call("ResetAIPortStreams", {})
             self.assertEqual(self.stopped, [])
-            time.sleep(0.3)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and ("stream", "A") not in self.stopped:
+                time.sleep(0.01)
         self.assertIn(("stream", "A"), self.stopped)
         self.assertIn(("detector", "A", True), self.stopped)
         self.assertEqual(av._stream_points, {})
@@ -2858,7 +2885,10 @@ class TestStreamPoints(Base):
         with mock.patch.object(av, "RESET_GRACE_S", 0.15):
             self.call("ResetAIPortStreams", {})
             self.stream("A")  # re-issued before the grace expires
-            time.sleep(0.3)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not any(
+                    call[0] == "stream" and call[1] == "B" for call in self.stopped):
+                time.sleep(0.01)
         streams = [call for call in self.stopped if call[0] == "stream"]
         self.assertEqual(streams, [("stream", "B")])
         self.assertIn("A", av._stream_points)

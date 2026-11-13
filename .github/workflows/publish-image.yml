@@ -169,7 +169,8 @@ jobs:
             echo
             echo '```'
             echo "docker pull $image:$VERSION"
-            echo "docker run -d --network host --cap-add NET_ADMIN --device /dev/dri $image:$VERSION"
+            echo "docker run -d --network host --cap-add NET_ADMIN --device /dev/dri \\"
+            echo "    -v diyport-data:/data $image:$VERSION --state-dir /data"
             echo '```'
             echo
             echo "Tags: ${tag_list% }"
@@ -178,5 +179,11 @@ jobs:
           } > notes.md
           flags=(--latest)
           [ "$PRERELEASE" = true ] && flags=(--prerelease --latest=false)
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "$TAG" --notes-file notes.md "${flags[@]}"
+          # A re-pushed tag (moved to a rebuilt commit) updates its Release instead of failing.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --notes-file notes.md "${flags[@]}"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "$TAG" --notes-file notes.md "${flags[@]}"
+          fi

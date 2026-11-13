@@ -146,7 +146,7 @@ sudo scripts/install.sh --console <UNVR-IP> [--parent-iface <iface>]
 
 Options: `--name NAME`, `--accel auto|rknn|edgetpu|openvino|cpu|none` (default `auto`; `--no-npu`
 is an alias for `none`), `--rknn PATH`, `--rknn-url URL` / `--rknn-sha256 HEX`,
-`--webui-port N`. Run as root. The manual equivalent:
+`--webui-port N`, `--webui-bind ADDR` (default `127.0.0.1`; `0.0.0.0` for LAN, no auth). Run as root. The manual equivalent:
 
 ```bash
 pip install -r requirements.txt

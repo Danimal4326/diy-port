@@ -1,4 +1,4 @@
-# diy-port - a DIY UniFi Protect "AI Port" (Orange Pi · Raspberry Pi · x86 · Mac)
+# diy-port: a DIY UniFi Protect AI Port for Orange Pi, Raspberry Pi, x86 and Mac
 
 <div align="center">
 
@@ -234,9 +234,10 @@ sudo scripts/install.sh --console <UNVR-IP> [--parent-iface <iface>]
   `--rknn-url` / `DIYPORT_RKNN_URL` / its default URL. `--rknn <path>` takes a
   local build, and a local `models-rknn/` copy (e.g. a checkout of
   `hutchx86/pi-port-models`) is also detected.
-- Opens the web UI on `:8090` (`--webui-port` to change) for board stats and
-  instance management. Instance create/destroy is localhost-only by default;
-  set `AIPORT_WEBUI_ALLOW_REMOTE=1` in the unit to allow it from the LAN.
+- Opens the web UI on `127.0.0.1:8090` by default (`--webui-port` and
+  `--webui-bind` to change) for board stats and instance management. Use
+  `--webui-bind 0.0.0.0` to expose it on the LAN; it has no auth. Instance
+  create/destroy is localhost-only unless `AIPORT_WEBUI_ALLOW_REMOTE=1` is set.
 
 Then, in Protect: adopt "AI Port" like any camera, and pair a real camera to it
 from the camera's own settings page. Detections appear as dashboard events with
@@ -508,7 +509,7 @@ ECI-T24F2, was set up as follows:
 | Frame Rate | 20 fps | 20 fps |
 | Max. Bit Rate | 3072 kbps | 2048 kbps |
 | Video Encoding | H.264 | H.264 |
-| H.264+ | Off | – |
+| H.264+ | Off | - |
 | Profile | Medium | Medium |
 | I-Frame Interval | 20 (1 s) | 20 (1 s) |
 | Smoothing | 50 | 25 |

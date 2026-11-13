@@ -126,11 +126,11 @@ in Protect before deleting it.
 
 ## Status web UI (optional)
 
-The repo-root `compose.yaml` includes a `webui` service that runs
-`sysinfo_server.py` on `:8090` (`http://<host>:8090`): CPU per-core, memory,
-GPU/NPU when present, and the Coral's USB link speed. It has **no auth** - LAN
-use only. Instance create/destroy is localhost-only by default (set
-`AIPORT_WEBUI_ALLOW_REMOTE=1` in the service to allow it from the LAN). The
+The repo-root `compose.yaml` includes an optional `webui` service that runs
+`sysinfo_server.py` on `127.0.0.1:8090` by default: CPU per-core, memory,
+GPU/NPU when present, and the Coral's USB link speed. It has **no auth**. To
+reach it from the LAN, change its `--bind-ip` to `0.0.0.0` and set
+`AIPORT_WEBUI_ALLOW_REMOTE=1` if you also want instance create/destroy. The
 instance buttons are `instance_manager` (board) features; ignore them off-board.
 Remove the `webui` service if you do not want it. The bridge stack does not
 include the web UI.
@@ -297,7 +297,8 @@ container on host networking:
   firmware push pinned to 5.1.16 (fake update), four cameras paired, RTSP pulls
   running, the onnxruntime detector emitting a real `EventSmartDetect`
   (`person`, `edgeType: enter`) and a snapshot upload.
-- Status web UI (`sysinfo_server.py` on `:8090`) serves on the Pi (GPU/NPU blank).
+- Status web UI (`sysinfo_server.py` on `127.0.0.1:8090` by default) serves on the Pi
+  (GPU/NPU blank).
 
 Confirmed on a Raspberry Pi 5 (Pi OS trixie) with a USB Coral, bridge stack next
 to the UNVR container:

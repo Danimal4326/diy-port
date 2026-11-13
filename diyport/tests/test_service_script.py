@@ -155,6 +155,7 @@ class TestLogWriter(unittest.TestCase):
 
     def test_rotates_at_the_size_and_keeps_the_newest(self):
         log = log_writer.RotatingLog(self.path, max_bytes=100, keep=2)
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
         for i in range(12):
             log.write(b"line %02d %s\n" % (i, b"x" * 30))   # 40 bytes each
         log.close()

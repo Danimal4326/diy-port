@@ -587,7 +587,11 @@ def _tmp_dir():
     use: macOS's periodic /tmp cleanup can remove it while diy-port runs."""
     config.make_stream_dir(_STREAM_DIR)
     path = os.path.join(_STREAM_DIR, "tmp")
-    os.makedirs(path, exist_ok=True)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
     return path
 
 
@@ -595,7 +599,7 @@ def _write_snapshot(path, data):
     """Replace the camera's snapshot file in one step, so a reader never sees half of it."""
     fd, tmp = tempfile.mkstemp(suffix=".jpg", dir=_tmp_dir())
     try:
-        os.fchmod(fd, 0o644)  # mkstemp's 0600; ffmpeg wrote the snapshot world-readable
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         os.replace(tmp, path)
@@ -1273,9 +1277,9 @@ def _faces_dirs():
 
 
 def _open_dir(path):
-    os.makedirs(path, exist_ok=True)
+    os.makedirs(path, mode=0o700, exist_ok=True)
     try:
-        os.chmod(path, 0o777)
+        os.chmod(path, 0o700)
     except OSError:
         pass
 
@@ -1309,7 +1313,7 @@ def _save_face_crop(device_id, tracker_id, tr):
         path = os.path.join(seen_dir, f"{stamp}_{device_id}_t{tracker_id}_{best['score']:.2f}.jpg")
         with open(path, "wb") as f:
             f.write(jpg.tobytes())
-        os.chmod(path, 0o666)
+        os.chmod(path, 0o600)
         names = sorted(n for n in os.listdir(seen_dir) if n.endswith(".jpg"))
         for old in names[:-FACES_SEEN_MAX]:
             os.remove(os.path.join(seen_dir, old))
@@ -3777,7 +3781,8 @@ def _upload_snapshot_image(upload_uri, device_info, requested_filename, what=Non
     files_form = {"payload": ("snapshot.jpg", data, "image/jpeg")}
     try:
         resp = requests.post(upload_uri, headers=headers, files=files_form,
-                              cert=(CERT_PATH, KEY_PATH), verify=False, timeout=15)
+                              cert=(CERT_PATH, KEY_PATH), verify=False,
+                              allow_redirects=False, timeout=15)
         log.info("uploaded snapshot (%d bytes) from %s to %s -> %s: %s",
                   len(data), path, _snapshot_uri_label(upload_uri), resp.status_code,
                   resp.text[:300])
@@ -3831,17 +3836,32 @@ def _describe_face_db(path):
     return "sqlite: " + "; ".join(parts)
 
 
+def _face_db_uri_ok(uri, device_info):
+    """Only the console's HTTPS host may receive the client cert and device headers."""
+    try:
+        parts = urlsplit(uri)
+    except (TypeError, ValueError):
+        return False
+    want = str(device_info.get("console_host") or "").strip().lower()
+    return bool(want and parts.scheme == "https" and (parts.hostname or "").lower() == want
+                and not parts.username and not parts.password
+                and not parts.query and not parts.fragment)
+
+
 def _download_face_db(uri, device_info):
     """Fetch the known-faces DB Protect offers (UpdateFaceDBRequest) into
     <state-dir>/facedb/ and log what it contains."""
     if not uri:
         log.warning("UpdateFaceDBRequest had no uri")
         return
+    if not _face_db_uri_ok(uri, device_info):
+        log.warning("refusing a face DB URI that is not the console's HTTPS host")
+        return
     headers = {"x-ident": device_info["mac_nosep"].upper(), "x-type": device_info["type"],
                "x-sysid": device_info["sysid_hex"]}
     try:
         resp = requests.get(uri, headers=headers, cert=(CERT_PATH, KEY_PATH), verify=False,
-                            timeout=30)
+                            allow_redirects=False, timeout=30)
     except requests.RequestException as e:
         log.warning("face DB download from %s failed: %r", uri, e)
         return
@@ -3849,9 +3869,14 @@ def _download_face_db(uri, device_info):
         log.info("face DB download from %s -> %s: %s", uri, resp.status_code, resp.text[:200])
         return
     out_dir = os.path.join(STATE_DIR or HERE, "facedb")
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(out_dir, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(out_dir, 0o700)
+    except OSError:
+        pass
     path = os.path.join(out_dir, "known.db")
-    with open(path + ".tmp", "wb") as f:
+    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
         f.write(resp.content)
     os.replace(path + ".tmp", path)
     try:

@@ -98,6 +98,15 @@ class TestSharedDecodeSource(unittest.TestCase):
             self.assertIsNone(av._shared_decode_source("D", "rtsp://cam/1"))
 
 
+class TestFaceDbURI(unittest.TestCase):
+    def test_only_the_console_https_host_is_accepted(self):
+        info = {"console_host": "192.0.2.1"}
+        self.assertTrue(av._face_db_uri_ok("https://192.0.2.1:7444/db", info))
+        for bad in ("http://192.0.2.1/db", "https://198.51.100.9/db",
+                    "https://user@192.0.2.1/db", "https://192.0.2.1/db?x=1"):
+            self.assertFalse(av._face_db_uri_ok(bad, info), bad)
+
+
 class TestDirectStreamURL(unittest.TestCase):
     def test_refuses_a_non_rtsp_direct_url(self):
         with self.assertRaises(ValueError):
@@ -3800,6 +3809,8 @@ class TestTmpDir(unittest.TestCase):
         with open(path, "rb") as f:
             self.assertEqual(f.read(), b"two")
         self.assertEqual(os.listdir(av._tmp_dir()), [])
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(av._tmp_dir()).st_mode & 0o777, 0o700)
 
     def test_tmp_dir_follows_the_state_dir(self):
         a = config.stream_dir("/srv/aiport-a")

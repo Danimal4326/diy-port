@@ -776,7 +776,8 @@ not responsible or liable for any loss or damage arising from its use.**
 
 ## Security
 
-Report vulnerabilities privately via GitHub Security Advisories. Runtime state -
+See [SECURITY.md](SECURITY.md) for the trusted-LAN boundary. Report
+vulnerabilities privately via GitHub Security Advisories. Runtime state -
 the adoption token and the mTLS client certificate/key - belongs in the instance
 state directory passed as `--state-dir`; the service and launchd installers
 always pass one. A manual run defaults to `$XDG_STATE_HOME/diyport` (or

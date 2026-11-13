@@ -58,10 +58,8 @@ FACE_MATCH_MIN_PX = envutil.env_int("AIPORT_FACE_MATCH_MIN_PX", 40)
 # embedding makes a bad enrolment.
 FACE_EMBED_MIN_NORM = envutil.env_float("AIPORT_FACE_EMBED_MIN_NORM", 7.0)
 
-# A face whose vector is shorter still isn't a face to show at all: the back of a head or a face
-# turned away (live 12:36-12:40 on Driveway: backs of heads 3.3 and 4.3, turned away 5.9; faces
-# 6.7-8.8, in profile too). Dropped once at least FACE_MATCH_MIN_PX, where the length means
-# something. AIPORT_FACE_DROP_NORM=0 keeps them all.
+# A short SFace vector (back of a head, face turned away) is dropped once the face is
+# at least FACE_MATCH_MIN_PX; AIPORT_FACE_DROP_NORM=0 keeps them.
 FACE_DROP_NORM = envutil.env_float("AIPORT_FACE_DROP_NORM", 6.0)
 
 

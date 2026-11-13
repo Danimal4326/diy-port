@@ -45,9 +45,7 @@ from procutil import start_stderr_drain
 
 log = logging.getLogger("aiport-onvif")
 
-# The channels that carry the camera's substream when it has one: UniFi's medium
-# and low channels are 720p and 360p, and video2 on the main stream made grids and
-# the app pull full resolution.
+# video2/video3 carry the camera's substream when it has one; UniFi medium/low are 720p/360p.
 SUB_CHANNELS = ("video2", "video3")
 
 # AIPORT_ONVIF_MODE: copy, transcode or isolated (per-camera exceptions allowed). See
@@ -153,14 +151,11 @@ GST_LATENCY_MS = 500
 GST_BIN = (shutil.which("gst-launch-1.0")
            or "/opt/homebrew/bin/gst-launch-1.0")  # launchd's PATH has no Homebrew
 TRANSCODE_VIDEO3_HEIGHT = 360
-# A TRANSCODE pipeline with a channel that has produced no video for this long is replaced
-# (0: never). Live 2026-11-03 17:24 on Driveway: gst-launch stayed alive with its RTSP socket
-# CLOSED and no output for 2.5 h. Only Protect's re-sends could end that, and a hang with
-# none went uncaught. Detection has its own pull and is left alone.
+# Replace a transcode pipeline with no video for this long (0: never). A gst hang can
+# keep its RTSP socket closed with no output; Protect re-sends alone will not end it.
 TRANSCODE_STALL_S = envutil.env_float("AIPORT_ONVIF_STALL_S", 30)
-# A settings re-send only replaces the pipeline when a channel has been silent this long.
-# Otherwise it reconnects just that push: a restart costs all three channels and a camera
-# session, and encoders that are still producing can't be why Protect lost one stream.
+# A re-send only replaces the pipeline when a channel has been silent this long; otherwise
+# just reconnect that push, since a restart costs all channels and a camera session.
 RESEND_RESTART_QUIET_S = 5.0
 
 
@@ -296,9 +291,8 @@ class ExtendedFlvWriter:
         self.g3_sync = g3_sync
         self.clock = clock
         self.now = self.start = self.last_sync = None
-        # Sync right after the first video frame, not 5 s in: Protect's ms drops a
-        # recording file that closes before its first sync ("no last known clock sync
-        # - dropping"), which lost the first ~5 s after every reconnect (live 2026-10-28).
+        # Sync immediately after the first video frame: Protect's ms drops a recording that closes
+        # before its first sync.
         self.early_sync = early_sync
         self._sync_next = False
         self.on_sync = None  # (streamClock ms, wallClock ms) of each onClockSync sent
@@ -494,9 +488,8 @@ def ffmpeg_push_cmd(ffmpeg_bin, source_url, stream_name, camera_audio=True, copy
     ]
 
 
-# GStreamer can't copy "whatever the camera sends" in one pipeline (parsebin dropped
-# Driveway's G.711 mu-law, live 2026-11-02 03:42), so TranscodePull tries each depayloader in
-# turn until one negotiates, and re-encodes to AAC as ffmpeg's fallback does.
+# Transcode tries each audio depayloader because one pipeline cannot copy every camera
+# format; it re-encodes to AAC like ffmpeg's fallback.
 GST_AUDIO = ("pcmu", "pcma", "aac", "encode")
 _GST_AAC = ["audioconvert", "!", "audioresample", "!", "audio/x-raw,rate=32000,channels=1",
             "!", "avenc_aac", "bitrate=32000", "!", "aacparse", "!", "mux.audio"]
@@ -812,13 +805,8 @@ class SharedPull:
                     self._sinks[sink] = True  # fell behind: it rejoins at a key frame
 
 
-# AIPORT_ONVIF_SHARED_DECODE=1: detection decodes the video1 FLV this instance pushes to
-# Protect, not its own RTSP pull, and each frame carries the wall time Protect gives it.
-# Live 2026-11-05 16:18 on Driveway (isolated): boxes led the truck by ~1.9 s, because Protect
-# places video by when each frame leaves gst (rtspsrc latency=500, vtdec, vtenc, flvmux,
-# fdsink sync=true) and boxes by when a separate ffmpeg pull handed the detector its frame.
-# Instance-wide; it covers every camera this instance transcodes. On by default since
-# 2026-11-06 (exact boxes at delay 0 on all four onvif cameras); 0 goes back to the camera pull.
+# Shared decode: detection decodes the pushed video1 and uses Protect's wall time, so boxes
+# line up without a separate camera pull. Instance-wide; 0 restores the camera pull.
 SHARED_DECODE = envutil.env_bool("AIPORT_ONVIF_SHARED_DECODE", True)
 DETECT_RECORD = struct.Struct(">BdI")  # kind, wall ms, length; then that many FLV bytes
 DETECT_BYTES, DETECT_FRAME = 0, 1      # kinds: FLV bytes; a video frame (one decoded picture)
@@ -1501,17 +1489,12 @@ def retry_delay(retry_s, failed):
     return min(PUSH_RETRY_MAX_S, base * 2 ** max(0, failed - 3)) if failed else base
 
 
-# Protect re-sends a channel's ChangeVideoSettings (same streamName) when its media server
-# has lost that stream: it rebuilds its ingest point and waits ~10 s for a fresh connection.
-# Live 2026-10-29: ignoring the repeat left video3 in "Timed out waiting for <deviceID>_2
-# to open" every 30 s and the low-quality view stuttering; unifi-cam-proxy reconnects on a
-# repeat. At most one reconnect per channel per RECONNECT_MIN_S, so a burst doesn't churn it.
+# Protect re-sends a channel's settings when its media server lost the stream; reconnect
+# that push, at most once per RECONNECT_MIN_S, instead of ignoring the repeat.
 RECONNECT_MIN_S = 10
 
-# A failed lookup of a camera's ONVIF profiles is tried again, or its video2/video3 stay on the
-# main stream until diy-port restarts. Live 2026-11-04 19:23:39 on Driveway: one "No route to
-# host", the camera reachable 2 s later, and video2 encoded at 2560x1440 instead of 1280x720.
-# First these quick tries, with the channels waiting, so a brief failure changes nothing...
+# Retry a failed ONVIF profile lookup quickly while the SUB channels wait; otherwise a
+# transient error leaves them on the main stream until restart.
 PROFILE_QUICK_RETRY_S = (2.0, 3.0)
 # ...then, with the channels on the main stream, these (the last repeats). Success moves them
 # to the substream at once, replacing the pushes.

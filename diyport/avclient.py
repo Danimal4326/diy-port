@@ -88,9 +88,7 @@ _HWDEC_BACKENDS = {
     "v4l2m2m": {"h264": ["-c:v", "h264_v4l2m2m"], "hevc": ["-c:v", "hevc_v4l2m2m"]},
     "videotoolbox": {"hevc": ["-hwaccel", "videotoolbox"]},
 }
-# Codecs hardware-decoded only when pulled straight from the camera (an ONVIF camera), not
-# through Protect's relay. A 2560x1440 Hikvision's H.264 (driveway clips, 2026-10-28) decoded
-# with 0 errors either way, VideoToolbox at ~1.4% of a core vs ~7.3% in software.
+# These codecs are hardware-decoded only on a direct ONVIF pull, never through the relay.
 _HWDEC_DIRECT = {
     "videotoolbox": {"h264": ["-hwaccel", "videotoolbox"]},
 }
@@ -1617,11 +1615,8 @@ def _plate_settled(device_id, coord):
     return False
 
 
-# Plate/face reads come from the analysed frame's own JPEG (the one its person and vehicle
-# boxes came from), at most every AIPORT_ENRICH_INTERVAL_S; between reads a face box moves
-# with its person. Live 2026-11-06 on the onvif instance: face boxes were sluggish next to
-# exact person boxes, because reads came from the 1 s snapshot file and each result was
-# re-sent with every newer frame's time until the next snapshot.
+# Plate/face reads use the analysed frame JPEG, at most every AIPORT_ENRICH_INTERVAL_S;
+# a face box follows its person between reads.
 ENRICH_INTERVAL_S = envutil.env_float("AIPORT_ENRICH_INTERVAL_S", 0.25)
 _enrich_last_read = {}  # deviceID -> monotonic s of the last fresh plate/face read
 
@@ -2091,16 +2086,8 @@ def _dedupe_detections(detections, iou_thresh=0.4):
     return out
 
 
-# One object, two labels: per-class NMS keeps a person box and an animal box drawn on the same
-# person. Live 19:02 on Driveway a person walking up the drive was also "animal" on a few
-# frames (box IoU ~0.6 with the person's), confirmed and joined the event as an animal. An
-# animal box over a person box in the same frame, or over a person track seen within
-# CROSS_TYPE_RECENT_MS, is taken as that person, so the person's track keeps its frames.
-# Person always wins: letting the higher score or an existing animal track decide, the 13:33
-# Driveway replay (two people crossing) boxed the second person as an animal at 0.9, and every
-# person box after that went to the animal track. A dog beside its walker is a far smaller
-# box, so overlaps far less. Vehicles stay out: a rider on a motorcycle can overlap it this
-# much and both count. AIPORT_CROSS_TYPE_IOU sets the overlap; 0 turns this off.
+# An animal box over a person is that person. Person wins over a higher-scoring animal
+# track; vehicles stay separate. AIPORT_CROSS_TYPE_IOU controls the overlap.
 CROSS_TYPE_IOU = envutil.env_float("AIPORT_CROSS_TYPE_IOU", 0.5)
 CROSS_TYPE_RECENT_MS = 1000
 
@@ -2233,16 +2220,11 @@ STILL_IOU = 0.7
 STILL_TICKS = _ticks(30)
 STARTUP_WINDOW_MS = 15000
 PARK_WHEN_STILL = ("vehicle",)
-# Once confirmed, a still person or animal parks too, so someone standing in the driveway
-# doesn't hold the camera's one event open to its time limit and pull later passers-by into
-# it. A real camera does the same: a stationary tracker is a bystander, carried in the
-# descriptors but not holding the event (unifi-cam-proxy's EventSmartDetect captures). Their
-# face parks with them. Unlike a vehicle, a person who never moved still opens an event.
+# A confirmed still person/animal parks too, so a bystander does not hold the camera's one
+# event open; their face parks with them. A person who never moved still opens an event.
 PARK_WHEN_STILL_IN_EVENT = PARK_WHEN_STILL + ("person", "animal")
-# People standing and talking shift and gesture, so their box rarely keeps STILL_IOU with its
-# anchor for STILL_TICKS (live 10:42: three people stood ~1 minute, longest IoU run 36 s).
-# For them, still is the box centre staying within RESUME_MOVE_FRACTION of the anchor box's
-# size for STILL_PERSON_MS of frame time, which doesn't stretch when detection falls behind.
+# People shift and gesture, so still means the box centre stays within RESUME_MOVE_FRACTION
+# for STILL_PERSON_MS, not the STILL_IOU tick count.
 STILL_BY_CENTRE = ("person", "animal")
 STILL_PERSON_MS = 20000
 
@@ -2307,11 +2289,8 @@ def _resume_recent(dev, d, event):
     return tid, tr, how
 
 
-# A face that turns up again in an open event continues the nearest face track that closed in
-# that event, wherever its person went: each face track is a face in Protect's list, and live
-# 15:44 on Driveway two people loading bikes, ducking behind a car, made 10 face tracks. A face
-# the embeddings show to be someone else (similarity under FACE_RESUME_MIN_SIM) starts its own,
-# and a named face is continued only by a read whose embedding shows the same person.
+# A face returning in an open event continues its nearest closed face track only when the
+# embedding matches; a different or named face starts its own.
 FACE_RESUME_MIN_SIM = 0.3
 
 
@@ -2495,11 +2474,8 @@ LEAVE_PRIORITY = {"face": 0, "person": 1, "vehicle": 2, "animal": 3}
 # A multi-participant leave: empty descriptors, one snapshot each, attributes in
 # trackerIDAttrMap; falls back to the single-tracker leave after LEAVE_FALLBACK_S.
 LEAVE_FALLBACK_S = 4.0
-# Each participant's final descriptor (best-frame box and score) also goes in that leave:
-# with empty descriptors Protect showed every multi-participant event at 30% (live
-# 2026-10-29: a person sent at 51 and a vehicle at 68 both showed 30%), while
-# single-participant leaves, which carry a descriptor, showed their real score.
-# AIPORT_MULTI_LEAVE_DESCRIPTORS=0 goes back to empty descriptors.
+# The leave carries each participant's final descriptor, or Protect shows every
+# multi-participant event at 30%; AIPORT_MULTI_LEAVE_DESCRIPTORS=0 disables this.
 MULTI_LEAVE_DESCRIPTORS = envutil.env_bool("AIPORT_MULTI_LEAVE_DESCRIPTORS", True)
 _pending_leaves = {}  # snapshot filename -> shared {"seen": bool} for a multi-tracker leave
 
@@ -3023,11 +2999,8 @@ def _motion_tick(ws, device_id):
         joining = []  # tracks that start (or resume) taking part in the event this tick
         detections = _animal_on_person(tracks, detections, now_ms, device_id)
         unclaimed = list(range(len(detections)))
-        # Zones decide what's reported, not what's tracked (as Frigate): every detection is
-        # tracked; a track joins the event only once its feet have been in a zone listing its
-        # type, and stays in it until it's gone. Live 11:38 on Camera B a walk to the front door
-        # crossed a gap between zones; dropping the detections there starved the person's track,
-        # named Alex, and it never made the event.
+        # Zones decide what is reported, not what is tracked. A track joins once it has been in
+        # a zone listing its type and stays until gone.
         for d in detections:
             if "in_zone" not in d:
                 d["zone_ids"] = _zones_of(device_id, d["coord"], d["objectType"])
@@ -3075,10 +3048,8 @@ def _motion_tick(ws, device_id):
                         tr["coord"] = list(tr["stationary_coord"])
                         tr["moved_ticks"] = 0
                     elif tr["objectType"] == "face" and not _person_moving(tracks, tr):
-                        # A face moves with its person. Live 15:43 on Driveway faces parked
-                        # since 12:36 and 12:39 took a passing face at their spot and rejoined
-                        # as faces of their own: the parked face goes, and the read starts or
-                        # resumes a track like any other.
+                        # A face moves with its person. A parked face that moves while its person is still is
+                        # dropped; the read at its spot starts or resumes a track like any other.
                         log.info("real motion tick: parked face tracker_id=%s dropped, its "
                                  "person isn't moving; the face at its spot is someone else's "
                                  "for deviceID=%s", tracker_id, device_id)
@@ -3143,9 +3114,8 @@ def _motion_tick(ws, device_id):
                       "track for deviceID=%s tracker_id=%s (last seen: %s score=%.2f)",
                       tolerance, device_id, tracker_id,
                       tr["objectType"], tr["score"])
-            # Only a track that joined the event goes in its leave: one that closes while the
-            # event is open without having joined (never confirmed, or never in a zone for its
-            # type, like a car on the far road at 11:57) isn't a participant.
+            # Only a track that joined the event goes in its leave; one that closed unseen or unzoned
+            # is not a participant.
             if (event is not None and not tr.get("stationary_coord")
                     and tr.get("event_id") == event["id"]):
                 event["finished"].append((tracker_id, tr))  # its snapshot goes in the leave
@@ -4464,10 +4434,8 @@ def _apply_motion_settings(payload):
         _motion_detectors.pop(device_id, None)
 
 
-# Experiment 2026-11-04: ONVIF cameras whose ChangeVideoSettings reply says audio is off (empty or
-# 0 for none, 1 for all, or a list of device IDs), while browser live view on them doesn't resume after about a minute
-# away from the page. Only the reply changes: the push keeps its audio track, since Protect's
-# media server needs one to finish initializing.
+# Optional audio-off reply for browsers that fail to resume live view; the push keeps
+# its audio track either way.
 _ONVIF_AUDIO_OFF = onvif_push.parse_camera_list(os.environ.get("AIPORT_ONVIF_AUDIO_OFF"))
 
 
@@ -4572,9 +4540,8 @@ def _start_onvif_camera(ws, msg_id, payload):
                     _start_stream(device_id, None, None, None, payload.get("width"),
                                   payload.get("height"), url=url)
                 finally:
-                    # After the probe: a transcode encodes at this size and Protect is told it,
-                    # so the camera's real size beats the announced one. Detection failing to
-                    # start must not cost the camera its video.
+                    # Use the probed size for the transcode and Protect's reply. Detection failing to start
+                    # must not cost the camera its video.
                     width, height = _onvif_main_size(device_id, payload)
                     _onvif.set_source(device_id, url, audio=payload.get("audio", True),
                                       width=width, height=height, fps=payload.get("fps"),
@@ -4932,12 +4899,8 @@ def _clear_adopt_state():
 # No wait-for-adopt gate: the unsolicited pre-adopt connection is load-bearing for candidate identity.
 
 
-# An adopted AI Port that Protect has been hanging up on, without a word, for this long is
-# probably no longer adopted (0: never warn). Protect sends no reason, and ResetToDefaults only
-# comes if we're connected at the moment of the removal: it isn't once in the log from
-# 2026-10-28 through four removals. Live 2026-11-02 19:30 on the ONVIF test instance: 699 closes
-# in a row with a token in adopt_state.json, each a generic ConnectionClosedError. Ordinary
-# reconnects settled sooner (65-78 s on 2026-11-03 and 2026-11-04), so this waits longer.
+# Warn after this long of unexplained closes: Protect removal looks like ordinary
+# reconnects, but those settled much sooner in the live logs.
 REFUSED_WARN_S = envutil.env_float("AIPORT_REFUSED_WARN_S", 180)
 
 

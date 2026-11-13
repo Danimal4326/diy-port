@@ -174,9 +174,7 @@ write_plist() {
     mkdir -p "$(dirname "$PLIST")" "$(dirname "$LAUNCHD_LOG")"
     local extra=""
     if [ -n "$DAEMON" ]; then
-        # SUDO_USER/SUDO_UID: the wrapper finds your home folder from them, and the Apple
-        # vehicle model's helper runs as you. No .pyc files: root's would block the agent's
-        # ownership check on the shared repo.
+        # Let the wrapper find your home and run the Apple helper as you; no root-owned .pyc.
         extra="
         <key>SUDO_USER</key><string>$USER_NAME</string>
         <key>SUDO_UID</key><string>$USER_ID</string>

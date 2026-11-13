@@ -29,9 +29,7 @@ fi
 # shellcheck disable=SC2034  # read by diyport_paths.sh
 USER_HOME=$(eval echo "~${SUDO_USER:-${USER:-$(id -un)}}")
 REPO=${DIYPORT_SERVICE_TEST:-$(cd "$(dirname "$0")/.." && pwd)}  # the test points it at a stub
-# ENV_FILE, TRIGGER, LOG, PIDFILE and DEFAULT_STATE_DIR. PIDFILE holds diy-port's process
-# group, so a wrapper killed outright (yesterday's app restart) doesn't leave an orphan holding
-# :443 that the next start can't get past.
+# PIDFILE holds diy-port's process group, so a killed wrapper does not orphan :443.
 # shellcheck disable=SC1091  # resolved at runtime from the script's own directory
 . "$(dirname "$0")/diyport_paths.sh"
 
@@ -98,9 +96,7 @@ stop_child() {
     child=""
 }
 stop_stale() {
-    # A diy-port left by an earlier wrapper that was killed outright: it has its own process
-    # group, so it outlives the wrapper and keeps :443. The leader may be gone while its
-    # stage children remain, so check the group as well as the pid.
+    # A killed wrapper's process group can outlive its run_all.py leader; check both.
     local old
     old=$(cat "$PIDFILE" 2>/dev/null) || return 0
     if [ -n "$old" ] && ps -p "$old" -o command= 2>/dev/null | grep -q "run_all.py"; then
@@ -143,11 +139,7 @@ while true; do
     stop_stale
     seen=$(mtime "$TRIGGER")
     echo "diyport_service: starting diy-port at $(date '+%F %T') (settings from $ENV_FILE)"
-    # A background job may start with SIGINT ignored, and Python then never raises
-    # KeyboardInterrupt; restore the default before exec so run_all can shut down cleanly.
-    # Job control only for this launch: diy-port gets its own process group (stop_child signals
-    # all of it), while the loop's sleeps and $(...) don't each get one, which raced and
-    # printed "child setpgid (...): Operation not permitted".
+    # Restore SIGINT before exec; job control gives diy-port its own group for stop_child.
     bind=()
     [ -n "${DIYPORT_BIND_IP:-}" ] && bind=(--bind-ip "$DIYPORT_BIND_IP")
     set -m

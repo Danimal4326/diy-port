@@ -89,7 +89,10 @@ state_dir() {
 
 migrate_legacy() {
     # The single instance from before ~/.diy-port becomes "native", with the same identity.
-    [ -n "$LEGACY" ] && [ -z "$DAEMON" ] || return 0
+    [ -n "$LEGACY" ] || return 0
+    if [ -n "$DAEMON" ]; then
+        die "legacy $LEGACY_ENV_FILE found; run '$0 install' as $USER_NAME first to migrate it, then install --daemon"
+    fi
     local old_plist=$USER_HOME/Library/LaunchAgents/$OLD_LABEL.plist
     if loaded "$OLD_LABEL"; then
         echo "stopping the old $OLD_LABEL agent"
@@ -115,14 +118,25 @@ migrate_legacy() {
     . "$REPO/scripts/diyport_paths.sh"   # now the new paths
 }
 
+stream_dir() {
+    # Ask config.stream_dir, so $TMPDIR and the state-dir hash match what the agent uses.
+    [ -x "$REPO/venv/bin/python" ] || return 0
+    "$REPO/venv/bin/python" - "$REPO/diyport" "$(state_dir)" <<'PY' 2>/dev/null || true
+import sys
+sys.path.insert(0, sys.argv[1])
+import config
+print(config.stream_dir(sys.argv[2]))
+PY
+}
+
 check_ownership() {
-    # Everything an agent writes must be yours: its state dir, the stream dir under /tmp, the
-    # repo (compiled files, the Apple helper build) and the log. A daemon is root.
+    # Everything an agent writes must be yours: its state dir, the stream dir, the repo
+    # (compiled files, the Apple helper build) and the log. A daemon is root.
     [ -z "$DAEMON" ] || return 0
-    # The stream dir is this instance's own under the shared /tmp/aiport-streams
-    # (config.stream_dir: a hash of the state dir's path).
     local paths=("$REPO" "$LOG" "$(state_dir)")
-    paths+=("/private/tmp/aiport-streams/$(printf %s "$(state_dir)" | shasum | cut -c1-12)")
+    local stream
+    stream=$(stream_dir)
+    [ -n "$stream" ] && paths+=("$stream")
     local bad=()
     for p in "${paths[@]}"; do
         [ -e "$p" ] || continue

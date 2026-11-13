@@ -176,6 +176,27 @@ class TestCommandLogging(unittest.TestCase):
 
 
 class TestMainLogging(unittest.TestCase):
+    def test_bad_json_is_not_echoed(self):
+        line = '{"op": "start", "url": "rtsp://admin:s3cr3t@192.0.2.10/1"\n'
+
+        class IdleProcess:
+            def handle(self, command):
+                raise AssertionError("bad JSON must not reach handle")
+            def report(self):
+                return {}
+            def stop_all(self):
+                pass
+
+        with mock.patch.object(rs, "_private_pipes",
+                               return_value=(io.StringIO(line), io.StringIO())), \
+                mock.patch.object(rs, "Process", return_value=IdleProcess()), \
+                mock.patch("config.apply_logging"), \
+                self.assertLogs("aiport-onvif", "WARNING") as logs:
+            rs.main(["diyport-onvif", "CAM"])
+        output = "\n".join(logs.output)
+        self.assertNotIn("s3cr3t", output)
+        self.assertIn("bad command", output)
+
     def test_the_main_loop_redacts_a_failed_command(self):
         line = json.dumps({"op": "start", "channel": "video1",
                            "url": "rtsp://admin:s3cr3t@192.0.2.10/1"}) + "\n"

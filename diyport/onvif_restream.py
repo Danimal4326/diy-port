@@ -350,7 +350,10 @@ def main(argv):
             try:
                 command = json.loads(line)
             except ValueError:
-                log.warning("restream process for %s: bad command %r", device_id, line[:100])
+                # Do not echo malformed input: truncating it can cut before the '@' and
+                # leave a password fragment in the log.
+                log.warning("restream process for %s: bad command (%d bytes, not logged)",
+                            device_id, len(line.rstrip("\n")))
                 continue
             try:
                 process.handle(command)

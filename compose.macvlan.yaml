@@ -3,7 +3,7 @@
 #
 # Dedicated LAN IP/MAC per container (macvlan); static IPs, wired NIC, illustrative only.
 
-name: diyport
+name: diyport-macvlan
 
 services:
   aiport:
@@ -49,3 +49,4 @@ networks:
 
 volumes:
   diyport-data:
+    name: diyport-macvlan-data

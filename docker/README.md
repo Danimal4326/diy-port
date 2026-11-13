@@ -110,7 +110,14 @@ a LAN address, and UBNT discovery broadcasts don't reach it. Use `compose.macos.
    # remove: sudo pfctl -a com.apple/diyport-docker -F all
    ```
 
-   Neither rule survives a reboot.
+   Neither rule survives a reboot. After a reboot (or before `up`), check both:
+
+   ```bash
+   sudo AIPORT_ADVERTISE_IP=192.0.2.39 AIPORT_IFACE=en0 \
+     scripts/macos_docker_preflight.sh
+   ```
+
+   It exits nonzero and prints the alias or pf command when either is missing.
 
 3. Start it with the address it should report:
 
@@ -195,6 +202,11 @@ Requirements and caveats:
   interface on the host (the console on the LAN can).
 - Give every instance a unique IP, MAC and `AIPORT_DEVICE_ID`, or the console
   sees one device instead of several.
+- The macvlan stack uses the `diyport-macvlan-data` volume, separate from the
+  host-net stack's `diyport_diyport-data`. Do not point both topologies at one
+  volume: the same adoption state with a different MAC is a different Protect
+  device. To migrate an old macvlan instance that used the shared volume, copy
+  it once with `docker run --rm -v diyport_diyport-data:/from -v diyport-macvlan-data:/to alpine sh -c 'cp -a /from/. /to/'`.
 
 Both modes require the target host to be on the console's LAN. Choose host mode
 for a quick single-instance test, macvlan when the host already uses `:443` or
@@ -239,10 +251,11 @@ The bridge stack keeps everything persistent in the `aiport-data` volume
   image rebuilds.
 
 `docker compose down -v` deletes the volume, i.e. the device identity. Remove the
-AI Port in Protect first. The LAN stacks mount the same `diyport-data` volume at
-`/data` and pass `--state-dir /data`, so adoption and identity also survive
-`up -d --build`; set `AIPORT_DEVICE_ID` / `AIPORT_MAC` explicitly if you need a
-fixed identity without the entrypoint wrapper.
+AI Port in Protect first. The host-net stack uses `diyport_diyport-data` and
+macvlan uses `diyport-macvlan-data`, both mounted at `/data` with
+`--state-dir /data`, so adoption and identity survive `up -d --build`; set
+`AIPORT_DEVICE_ID` / `AIPORT_MAC` explicitly if you need a fixed identity
+without the entrypoint wrapper.
 
 ## Coral
 

@@ -678,8 +678,8 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
 - **Known:** paired cameras get ordinary motion events from diy-port
   (`EventSmartMotion` start/stop, timed by Protect's `ChangeSmartMotionSettings`), not
   from the camera whose own events Protect drops. diy-port sends no heatmap or pulses,
-  so motion-triggered recording and alerts work but the live "detected motion" overlay
-  has nothing to draw. See `docs/protect-aiport-controller.md`.
+  so motion events reach Protect but the live "detected motion" overlay has nothing to
+  draw. See `docs/protect-aiport-controller.md`.
 - **Gap: no audio detection for paired cameras.** Protect also drops a paired camera's
   own `EventSmartAudio` (smoke/CO alarm, glass break, etc.), and diy-port's feature
   flags list no audio types, so those detections are turned off while the camera is

@@ -3555,6 +3555,104 @@ class MotionGate(unittest.TestCase):
         self.assertFalse(av._scene_changed("absent"))
 
 
+class TestMotionEvents(Base):
+    """EventSmartMotion: Protect drops a paired camera's own motion events, so the AI
+    Port sends start/stop, timed by the ChangeSmartMotionSettings linger values."""
+
+    def setUp(self):
+        super().setUp()
+        for table in (av._motion_settings, av._motion_events, av._motion_boxes,
+                      av._motion_detectors):
+            table.clear()
+            self.addCleanup(table.clear)
+        self.now = 1_760_000_000_000
+        av._stream_started_monotonic_ms["D"] = 0
+        self.addCleanup(av._stream_started_monotonic_ms.pop, "D", None)
+        for target, value in (("_classify_frame_detections", lambda dev: []),
+                              ("_enrich_detections", lambda dev, dets: [])):
+            patcher = mock.patch.object(av, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def configure(self, **overrides):
+        payload = {"deviceID": "D", "enable": True,
+                   "zones": {"1": {"coord": [0, 0, 1000, 0, 1000, 1000, 0, 1000],
+                                   "level": 50}},
+                   "lingerEventStartMSec": 1000, "lingerEventStopMSec": 3000,
+                   "eventMaxDurationMSec": 300000}
+        payload.update(overrides)
+        av.handle_function(None, {"functionName": "ChangeSmartMotionSettings",
+                                  "messageId": 1, "payload": payload}, {})
+
+    def tick(self, changed, step=500):
+        self.now += step
+        av._analysed_frame_time["D"] = (self.now, self.now)
+        with mock.patch.object(av, "_scene_changed", lambda dev: changed):
+            av._motion_tick(None, "D")
+
+    def motions(self):
+        return [(p["edgeType"], p["eventId"], p["eventType"])
+                for fn, p in self.sent if fn == "EventSmartMotion"]
+
+    def test_start_after_linger_then_stop_after_quiet(self):
+        self.configure(lingerEventStartMSec=1000, lingerEventStopMSec=2000)
+        self.tick(True)                                   # first motion: candidate
+        self.assertEqual(self.motions(), [])
+        self.tick(True)                                   # 0.5 s later: still waiting
+        self.assertEqual(self.motions(), [])
+        self.tick(True)                                   # persisted 1 s: start
+        self.assertEqual(self.motions(), [("start", 1, "motion")])
+        self.tick(True)                                   # still moving: one event
+        self.assertEqual(len(self.motions()), 1)
+        self.tick(False)                                  # quiet 0.5 s
+        self.assertEqual(len(self.motions()), 1)
+        for _ in range(3):                                # quiet 2 s: stop
+            self.tick(False)
+        self.assertEqual(self.motions(), [("start", 1, "motion"), ("stop", 1, "motion")])
+
+    def test_payload_matches_protect_motion_message(self):
+        self.configure(lingerEventStartMSec=0)
+        self.tick(True)
+        fn, payload = self.sent[-1]
+        self.assertEqual(fn, "EventSmartMotion")
+        self.assertEqual(payload["deviceID"], "D")
+        for key in ("clockBestMonotonic", "clockBestWall", "clockMonotonic", "clockStream",
+                    "clockStreamRate", "clockWall", "eventId", "motionHeatmap",
+                    "motionSnapshot"):
+            self.assertIn(key, payload)
+        self.assertEqual((payload["eventType"], payload["edgeType"]), ("motion", "start"))
+        self.assertEqual((payload["motionHeatmap"], payload["motionSnapshot"]), ("", ""))
+
+    def test_no_events_until_protect_enables_motion(self):
+        self.tick(True)
+        self.assertEqual(self.motions(), [])
+
+    def test_disabling_closes_the_open_event(self):
+        self.configure(lingerEventStartMSec=0)
+        self.tick(True)
+        self.configure(enable=False)
+        self.tick(False)
+        self.assertEqual(self.motions()[-1], ("stop", 1, "motion"))
+        self.tick(True)
+        self.assertEqual(len(self.motions()), 2)          # no start while disabled
+
+    def test_max_duration_splits_the_event(self):
+        self.configure(lingerEventStartMSec=0, eventMaxDurationMSec=1000)
+        self.tick(True)
+        self.tick(True)                                   # 0.5 s: still one event
+        self.tick(True)                                   # 1 s: close it
+        self.assertEqual(self.motions(), [("start", 1, "motion"), ("stop", 1, "motion")])
+        self.tick(True)
+        self.tick(True)                                   # motion continues: new event
+        self.assertEqual(self.motions()[-1], ("start", 2, "motion"))
+
+    def test_stream_teardown_closes_the_event(self):
+        self.configure(lingerEventStartMSec=0)
+        self.tick(True)
+        av._stop_motion_detector("D", ws=object())
+        self.assertEqual(self.motions()[-1], ("stop", 1, "motion"))
+
+
 def _fake_jpeg(body):
     """SOI, a table segment holding FF D9, a start-of-scan header, `body`, EOI."""
     dqt = b"\xff\xdb\x00\x06\x00\xff\xd9\x01"

@@ -2127,8 +2127,18 @@ def _animal_on_person(tracks, detections, now_ms, device_id=None):
 
 _scene_ref = {}  # deviceID -> (downsampled grayscale reference frame, monotonic ms taken)
 _motion_detectors = {}  # deviceID -> motion.MotionDetector (rebuilt when settings change)
-_motion_settings = {}   # deviceID -> {"level", "zones"} from ChangeSmartMotionSettings
+# deviceID -> {"level", "zones", "enable", "start_ms", "stop_ms", "max_ms"} from
+# ChangeSmartMotionSettings. enable stays False until Protect asks for motion events.
+_motion_settings = {}
 _motion_boxes = {}      # deviceID -> this frame's motion boxes (detector-frame pixels)
+# Motion events (the real ubnt_smart_motion): Protect ignores a paired camera's own
+# EventSmartMotion, so the AI Port must send it. Defaults match
+# smartmotion-default-response.json; event_id starts at 0 and is never reused per stream.
+MOTION_EVENT_DEFAULT_START_MS = 1000
+MOTION_EVENT_DEFAULT_STOP_MS = 3000
+MOTION_EVENT_DEFAULT_MAX_MS = 300000
+# deviceID -> {"active", "event_id", "since_ms", "started_ms", "last_motion_ms"}
+_motion_events = {}
 
 
 def _canvas_to_image(device_id, x, y):
@@ -2979,6 +2989,7 @@ def _motion_tick(ws, device_id):
         if device_id in _latest_frame_time:
             _analysed_frame_time[device_id] = _latest_frame_time[device_id]
     changed = _scene_changed(device_id)
+    _update_motion_event(ws, device_id, changed)
     # The startup look runs on a still scene too: live 17:05 Camera A saw no motion for
     # 27 s at dusk, so its parked cars were first detected after the window and opened an event.
     in_startup = started is None or _frame_wall_ms(device_id) - started <= STARTUP_WINDOW_MS
@@ -3359,6 +3370,14 @@ def _stop_motion_detector(device_id, preserve_tracks=False, ws=None):
         t.join(timeout=MOTION_POLL_INTERVAL_S + 5.0)
     if preserve_tracks:
         return
+    state = _motion_events.pop(device_id, None)
+    if state and state.get("active") and ws is not None:
+        # The stream is gone, so motion cannot be reported any more: close the event now.
+        try:
+            _send_motion_event(ws, device_id, "stop", state["event_id"],
+                               _frame_wall_ms(device_id))
+        except Exception:
+            log.warning("could not close the motion event for deviceID=%s", device_id)
     with _motion_lock:
         dev = _motion_state.get(device_id)
         open_tracks = list((dev or {}).get("tracks", {}).items())
@@ -4455,19 +4474,98 @@ def _used_points():
     return _points_value(sum(_stream_points.values()))
 
 
+def _nonneg_ms(value, default):
+    """A non-negative integer millisecond setting, or `default` for anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return default
+    return int(value)
+
+
 def _apply_motion_settings(payload):
-    """Protect's motion zones and sensitivity (each zone's `level`, 0-100) for the motion
-    gate; the detector is rebuilt on its next frame when they change."""
+    """Protect's enhanced-motion settings for a paired camera: motion zones and each zone's
+    `level` for the gate, and the event enable/linger timings for EventSmartMotion."""
     device_id = payload.get("deviceID")
     zones = payload.get("zones")
     if not device_id or not isinstance(zones, dict):
         return
+    previous = _motion_settings.get(device_id) or {}
     levels = [z.get("level") for z in zones.values()
               if isinstance(z, dict) and isinstance(z.get("level"), (int, float))]
-    settings = {"zones": zones, "level": max(levels) if levels else 50}
+    enable = payload.get("enable")
+    settings = {
+        "zones": zones,
+        "level": max(levels) if levels else 50,
+        # A partial message must not silently switch motion events on or off.
+        "enable": enable if isinstance(enable, bool) else previous.get("enable", False),
+        "start_ms": _nonneg_ms(payload.get("lingerEventStartMSec"),
+                               previous.get("start_ms", MOTION_EVENT_DEFAULT_START_MS)),
+        "stop_ms": _nonneg_ms(payload.get("lingerEventStopMSec"),
+                              previous.get("stop_ms", MOTION_EVENT_DEFAULT_STOP_MS)),
+        "max_ms": _nonneg_ms(payload.get("eventMaxDurationMSec"),
+                             previous.get("max_ms", MOTION_EVENT_DEFAULT_MAX_MS)),
+    }
     if _motion_settings.get(device_id) != settings:
         _motion_settings[device_id] = settings
         _motion_detectors.pop(device_id, None)
+
+
+def _send_motion_event(ws, device_id, edge_type, event_id, now_ms):
+    """One EventSmartMotion start or stop, in the shape Protect's motionMessage schema
+    requires (motionHeatmap and motionSnapshot must be strings; empty is accepted)."""
+    clock_mono, clock_stream = _stream_clocks(device_id)
+    wall = _clock_wall(device_id, now_ms)
+    send_msg(ws, "EventSmartMotion", {
+        "deviceID": device_id,
+        "clockBestMonotonic": 0,
+        "clockBestWall": wall,
+        "clockMonotonic": clock_mono,
+        "clockStream": clock_stream,
+        "clockStreamRate": 1000,
+        "clockWall": wall,
+        "edgeType": edge_type,
+        "eventId": event_id,
+        "eventType": "motion",
+        "motionHeatmap": "",
+        "motionSnapshot": "",
+    }, response_expected=False)
+    log.info("motion event %s for deviceID=%s (eventId=%d)", edge_type, device_id, event_id)
+
+
+def _update_motion_event(ws, device_id, changed):
+    """Open an EventSmartMotion after motion persists for `lingerEventStartMSec`, close it
+    `lingerEventStopMSec` after the last motion, and split an event at eventMaxDurationMSec."""
+    settings = _motion_settings.get(device_id) or {}
+    state = _motion_events.setdefault(device_id, {"active": False, "event_id": 0,
+                                                   "since_ms": None, "started_ms": None,
+                                                   "last_motion_ms": None})
+    now_ms = _frame_wall_ms(device_id)
+    if not settings.get("enable", False):
+        if state["active"]:
+            _send_motion_event(ws, device_id, "stop", state["event_id"], now_ms)
+            state.update({"active": False, "since_ms": None, "started_ms": None})
+        return
+    if changed:
+        state["last_motion_ms"] = now_ms
+        if state["active"]:
+            max_ms = settings.get("max_ms", MOTION_EVENT_DEFAULT_MAX_MS)
+            if max_ms and now_ms - state["started_ms"] >= max_ms:
+                _send_motion_event(ws, device_id, "stop", state["event_id"], now_ms)
+                state.update({"active": False, "since_ms": None, "started_ms": None})
+            return
+        if state["since_ms"] is None:
+            state["since_ms"] = now_ms
+        if now_ms - state["since_ms"] >= settings.get("start_ms", MOTION_EVENT_DEFAULT_START_MS):
+            state["event_id"] += 1
+            state.update({"active": True, "started_ms": now_ms})
+            _send_motion_event(ws, device_id, "start", state["event_id"], now_ms)
+        return
+    if state["active"]:
+        if now_ms - (state["last_motion_ms"] or now_ms) >= settings.get(
+                "stop_ms", MOTION_EVENT_DEFAULT_STOP_MS):
+            _send_motion_event(ws, device_id, "stop", state["event_id"], now_ms)
+            state.update({"active": False, "since_ms": None, "started_ms": None})
+    else:
+        state["since_ms"] = None
 
 
 # Optional audio-off reply for browsers that fail to resume live view; the push keeps

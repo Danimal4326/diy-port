@@ -675,13 +675,11 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
   faces; faces are matched against Protect's known-faces DB (`UpdateFaceDBRequest`), but
   the attribute and plate field mapping is a **best-guess wire format** not confirmed
   against a real AI Port capture.
-- **Gap: no motion events for paired cameras.** While a camera is paired, Protect
-  ignores the camera's own motion events (`EventSmartMotion`/`EventAnalytics`) and
-  takes them from the AI Port, but diy-port doesn't send any yet. Paired cameras show
-  no motion-only events, motion-triggered recording only follows smart detections,
-  and motion alerts don't fire. diy-port already runs a motion detector on every
-  frame; the missing piece is the exact `EventSmartMotion` start/pulse/stop payload
-  Protect expects. See `docs/protect-aiport-controller.md`.
+- **Known:** paired cameras get ordinary motion events from diy-port
+  (`EventSmartMotion` start/stop, timed by Protect's `ChangeSmartMotionSettings`), not
+  from the camera whose own events Protect drops. diy-port sends no heatmap or pulses,
+  so motion-triggered recording and alerts work but the live "detected motion" overlay
+  has nothing to draw. See `docs/protect-aiport-controller.md`.
 - **Gap: no audio detection for paired cameras.** Protect also drops a paired camera's
   own `EventSmartAudio` (smoke/CO alarm, glass break, etc.), and diy-port's feature
   flags list no audio types, so those detections are turned off while the camera is

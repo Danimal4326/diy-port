@@ -240,12 +240,16 @@ Ranked by impact. Each was checked against both codebases.
    stop filtering, detect zones stop restricting, and Line Crossing stops, until
    Protect happens to resend the full settings. Fix: only update keys that are present.
 
-2. **No motion events for paired cameras.** Protect drops a paired camera's own
-   `EventSmartMotion`/`EventAnalytics`, and diy-port never sends them. Motion-only
-   events and motion-triggered recording for paired cameras likely stop. diy-port needs
-   to send `EventSmartMotion` (`eventType: "motion"`, `edgeType: start|stop`, or
-   `eventType: "pulse"`) with `deviceID`. The exact payload fields still need to be
-   read from the `events.cameras.motionStart` handler.
+2. ~~**No motion events for paired cameras.**~~ Fixed: `ChangeSmartMotionSettings`
+   stores `enable`, both linger times and `eventMaxDurationMSec`; the existing
+   per-frame motion gate now sends `EventSmartMotion` `start`/`stop` with `deviceID`
+   and Protect 7.3.70's full `motionMessage` fields. The event opens once motion
+   persists for `lingerEventStartMSec`, closes `lingerEventStopMSec` after the last
+   motion, and is split at `eventMaxDurationMSec`. Pulses and the heatmap are not
+   sent, so Protect records motion events without the UI's heatmap overlay. Original
+   finding: Protect drops a paired camera's own `EventSmartMotion`/`EventAnalytics`,
+   and diy-port never sent them, so motion-only events and motion-triggered recording
+   stopped.
 
 3. **Camera audio detections are lost.** The same rule drops the camera's own
    `EventSmartAudio`, and diy-port's feature flags have no audio types, so the camera's

@@ -81,6 +81,8 @@ which sees the host's bridge interfaces. A macvlan console cannot reach
 discovery scan also ignores Docker's normal `br-<hash>` interface names: the
 stack names the host bridge `${AIPORT_BRIDGE_NAME:-br1}`, which matches the
 `br<N>` names Protect scans. Pick another free `br<N>` if `br1` is taken.
+Protect scans once a minute, so allow up to a minute for the AI Port to appear
+after `docker compose up`.
 
 Then adopt "AI Port" in Protect and pair a UniFi camera to it. Verified on a
 Raspberry Pi 5 (Pi OS trixie) with a USB Coral, next to the UNVR container:

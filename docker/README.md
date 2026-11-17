@@ -74,6 +74,14 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
+The supported setup is a console with host networking (`network_mode: host`),
+which sees the host's bridge interfaces. A macvlan console cannot reach
+`172.30.10.10`, and a console on a bridge of its own does not scan this one
+(put both containers on the same Docker network if you need that). Protect's
+discovery scan also ignores Docker's normal `br-<hash>` interface names: the
+stack names the host bridge `${AIPORT_BRIDGE_NAME:-br1}`, which matches the
+`br<N>` names Protect scans. Pick another free `br<N>` if `br1` is taken.
+
 Then adopt "AI Port" in Protect and pair a UniFi camera to it. Verified on a
 Raspberry Pi 5 (Pi OS trixie) with a USB Coral, next to the UNVR container:
 discovery, adoption, restart, a UniFi camera via Protect's relay, and a
@@ -87,6 +95,7 @@ Hikvision 4K ONVIF camera (video push, live view, recording, detection).
 | `AIPORT_DETECTOR` | image `ACCEL` | Container env: detector backend override (`cpu`/`edgetpu`/`openvino`/`none`) |
 | `AIPORT_ACCEL` | `edgetpu` | Compose build arg: detector baked into the image |
 | `AIPORT_IP` / `AIPORT_SUBNET` | `172.30.10.10` / `172.30.10.0/24` | Compose interpolation: container address/subnet; keep the IP fixed, the console stores it |
+| `AIPORT_BRIDGE_NAME` | `br1` | Host bridge name; must be a free `br<N>` for Protect's discovery scan |
 
 The trade-off: the AI Port lives on the Docker subnet, so only that host can
 reach it. A console on another machine cannot - use `scripts/install.sh` or the

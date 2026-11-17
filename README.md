@@ -411,6 +411,11 @@ host. `docker/docker-compose.yml` instead puts the AI Port on a private bridge
 network: it gets its own `:443`, and host ↔ container traffic is routed without
 NAT, so the console reaches it at `AIPORT_IP`.
 
+The supported setup is a console with host networking. A macvlan console cannot
+reach the Docker subnet, and a bridge-network console does not scan this bridge.
+Protect also scans only host interfaces named `br<N>`, so the stack names its
+bridge `AIPORT_BRIDGE_NAME` (default `br1`), not Docker's usual `br-<hash>`.
+
 ```bash
 cd docker
 echo "AIPORT_CONSOLE=<console-ip>" > .env

@@ -10,10 +10,13 @@
   ids, per-camera box timing, stream recovery/backoff, replay harness, per-camera
   frames and host load lines, macOS launchd service. Fixes: track timers follow
   the analysed-frame rate, and the auto-hwdec tests pass on an RK3588 host.
-- **Unreleased** - paired cameras now send ordinary motion events
-  (`EventSmartMotion` start/stop, timed by Protect's `ChangeSmartMotionSettings`), so
-  motion-only events and motion-triggered recording no longer depend on the camera's
-  own events that Protect drops. Pluggable detector backends (`diyport/detectors/`): RK3588
+- **Unreleased** - the same-host Docker stack names its host bridge `br1`
+  (`AIPORT_BRIDGE_NAME`), because Protect's discovery scan ignores Docker's usual
+  `br-<hash>` names; the console must run with host networking. Paired cameras now
+  send ordinary motion events (`EventSmartMotion` start/stop, timed by Protect's
+  `ChangeSmartMotionSettings`), so motion-only events and motion-triggered recording
+  no longer depend on the camera's own events that Protect drops. Pluggable detector
+  backends (`diyport/detectors/`): RK3588
   NPU, Coral Edge TPU (Raspberry Pi 5) and CPU/Core ML, chosen by `[hardware]
   detector` / `install.sh --accel`; ONVIF cameras (video push to Protect plus
   detection); a Docker bridge setup for a console on the same host; credentials
